@@ -355,6 +355,7 @@ void Shader::allocparams(Slot *slot)
             UNIFORMTEX("lmcolor", 1);
             UNIFORMTEX("lmdir", 2);
             tmu++;
+            if(type & SHADER_RNM) { UNIFORMTEX("lmbasis2", 3); tmu++; }   // 3rd RNM basis lightmap
         }
         else UNIFORMTEX("lightmap", 1);
         if(type & SHADER_ENVMAP) UNIFORMTEX("envmap", tmu++);

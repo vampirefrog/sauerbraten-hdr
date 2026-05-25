@@ -274,6 +274,7 @@ VARP(reflectdist, 0, 2000, 10000);
     }); \
     VARR(name##fog, 0, 150, 10000); \
     VARR(name##spec, 0, 150, 1000); \
+    FVARR(gi##name, 0, 0, 64); \
     HVARFR(name##fallcolour, 0, 0, 0xFFFFFF, \
     { \
         name##fallcolor = bvec((name##fallcolour>>16)&0xFF, (name##fallcolour>>8)&0xFF, name##fallcolour&0xFF); \
@@ -298,7 +299,8 @@ GETMATIDXVAR(water, spec, int)
         if(!name##colour) name##colour = 0xFF4000; \
         name##color = bvec((name##colour>>16)&0xFF, (name##colour>>8)&0xFF, name##colour&0xFF); \
     }); \
-    VARR(name##fog, 0, 50, 10000);
+    VARR(name##fog, 0, 50, 10000); \
+    FVARR(gi##name, 0, 0, 64);
 
 LAVAVARS(lava)
 LAVAVARS(lava2)
@@ -308,6 +310,11 @@ LAVAVARS(lava4)
 GETMATIDXVAR(lava, colour, int)
 GETMATIDXVAR(lava, color, const bvec &)
 GETMATIDXVAR(lava, fog, int)
+
+// GI area-light emission scale per material variant (0 = not emissive). Names: giwater/giwater2..,
+// gilava/gilava2.., giglass/giglass2.. ; emitted radiance = material colour * this scale.
+float getwateremission(int mat) { switch(mat&MATF_INDEX) { default: case 0: return giwater; case 1: return giwater2; case 2: return giwater3; case 3: return giwater4; } }
+float getlavaemission(int mat)  { switch(mat&MATF_INDEX) { default: case 0: return gilava;  case 1: return gilava2;  case 2: return gilava3;  case 3: return gilava4;  } }
 
 void setprojtexmatrix(Reflection &ref)
 {
@@ -1056,6 +1063,6 @@ nowaterfall:
 
     if(!refs) return;
     glViewport(0, 0, screenw, screenh);
-    glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+    glBindFramebuffer_(GL_FRAMEBUFFER, scenefbo);
 }
 

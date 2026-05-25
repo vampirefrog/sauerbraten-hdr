@@ -738,7 +738,7 @@ void addgrasstri(int face, vertex *verts, int numv, ushort texture, ushort lmid)
     g.lmid = lmid;
 }
 
-static inline void calctexgen(VSlot &vslot, int dim, vec4 &sgen, vec4 &tgen)
+void calctexgen(VSlot &vslot, int dim, vec4 &sgen, vec4 &tgen)
 {
     Texture *tex = vslot.slot->sts.empty() ? notexture : vslot.slot->sts[0].t;
     const texrotation &r = texrotations[vslot.rotation];
@@ -821,6 +821,7 @@ void addcubeverts(VSlot &vslot, int orient, int size, vec *pos, int convex, usho
     {
         lm = &lightmaps[lmid-LMID_RESERVED];
         if((lm->type&LM_TYPE)==LM_DIFFUSE ||
+            (lm->type&LM_TYPE)==LM_RNM0 ||    // 3-basis RNM (HDR): basis0 tex + the 2 consecutive bases
             ((lm->type&LM_TYPE)==LM_BUMPMAP0 &&
                 lightmaps.inrange(lmid+1-LMID_RESERVED) &&
                 (lightmaps[lmid+1-LMID_RESERVED].type&LM_TYPE)==LM_BUMPMAP1))

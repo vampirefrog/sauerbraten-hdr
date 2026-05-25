@@ -87,9 +87,10 @@ struct SlotShaderParamState : LocalShaderParamState
 
 enum 
 { 
-    SHADER_DEFAULT    = 0, 
-    SHADER_NORMALSLMS = 1<<0, 
+    SHADER_DEFAULT    = 0,
+    SHADER_NORMALSLMS = 1<<0,
     SHADER_ENVMAP     = 1<<1,
+    SHADER_RNM        = 1<<2,   // 3-basis radiosity-normal-mapped (HDR) lightmaps; binds a 3rd lightmap
     SHADER_OPTION     = 1<<3,
 
     SHADER_INVALID    = 1<<8,
@@ -450,9 +451,10 @@ struct ImageData
     uchar *data;
     void *owner;
     void (*freefunc)(void *);
+    bool hdr;   // data is RGBE-encoded HDR (bpp==4); decoded to linear in the shader
 
     ImageData()
-        : data(NULL), owner(NULL), freefunc(NULL)
+        : data(NULL), owner(NULL), freefunc(NULL), hdr(false)
     {}
 
     
@@ -479,6 +481,7 @@ struct ImageData
         align = nalign;
         pitch = align ? 0 : w*bpp;
         compressed = ncompressed;
+        hdr = false;
         data = ndata ? ndata : new uchar[calcsize()];
         if(!ndata) { owner = this; freefunc = NULL; }
     }
@@ -558,8 +561,9 @@ struct Texture
     bool mipmap, canreduce;
     GLuint id;
     uchar *alphamask;
+    bool hdr;   // texture holds RGBE-encoded HDR data; sampling shaders must decode
 
-    Texture() : alphamask(NULL) {}
+    Texture() : alphamask(NULL), hdr(false) {}
 };
 
 enum
@@ -656,13 +660,21 @@ struct Slot
     int layermaskmode;
     float layermaskscale;
     ImageData *layermask;
+    vec albedo;     // average diffuse reflectance (for GI colour-bleed bounces); -1 = not computed
+    vec emission;   // average emitted radiance (glow x glowcolor) so emissive textures act as GI area lights
+    uchar *emissionmap; // optional per-texel emitted radiance (RGB, emissionw*emissionh) for per-texel emissive GI
+    int emissionw, emissionh;
 
-    Slot(int index = -1) : index(index), variants(NULL), autograss(NULL), layermaskname(NULL), layermask(NULL) { reset(); }
+    Slot(int index = -1) : index(index), variants(NULL), autograss(NULL), layermaskname(NULL), layermask(NULL), emissionmap(NULL) { reset(); }
     
     void reset()
     {
         smooth = -1;
         sts.shrink(0);
+        albedo = vec(-1, -1, -1);
+        emission = vec(0, 0, 0);
+        DELETEA(emissionmap);
+        emissionw = emissionh = 0;
         shader = NULL;
         params.shrink(0);
         loaded = false;

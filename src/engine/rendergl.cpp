@@ -1902,7 +1902,9 @@ void gl_drawframe()
 
     visiblecubes();
 
-    glClear(GL_DEPTH_BUFFER_BIT|(wireframe && editmode ? GL_COLOR_BUFFER_BIT : 0));
+    bool hdrpass = beginhdr();
+
+    glClear(GL_DEPTH_BUFFER_BIT|((wireframe && editmode) || hdrpass ? GL_COLOR_BUFFER_BIT : 0));
 
     if(wireframe && editmode) glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 
@@ -1949,6 +1951,7 @@ void gl_drawframe()
     addmotionblur();
     addglare();
     if(isliquid(fogmat&MATF_VOLUME)) drawfogoverlay(fogmat, fogblend, abovemat);
+    if(hdrpass) endhdr();   // tonemap the fp16 scene buffer down to the backbuffer
     renderpostfx();
 
     gl_drawhud();

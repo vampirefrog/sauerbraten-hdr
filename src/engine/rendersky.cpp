@@ -464,7 +464,10 @@ static void drawatmosphere(int w, float z1clip = 0.0f, float z2clip = 1.0f, int 
     vec zenithdepth = vec(atmoshells).add(planetradius*planetradius).sqrt().sub(planetradius);
     vec zenithweight = vec(betar).mul(zenithdepth.x).madd(betam, zenithdepth.y).madd(betao, zenithdepth.z - zenithdepth.x);
     vec zenithextinction = vec(zenithweight).sub(sunweight).exp2();
-    vec diskcolor = (atmosundisk ? atmosundiskcolor.tocolor() : suncolor).square().mul(zenithextinction).mul(atmosundiskbright * (glaring ? 1 : 1.5f)).min(1);
+    vec diskcolor = (atmosundisk ? atmosundiskcolor.tocolor() : suncolor).square().mul(zenithextinction).mul(atmosundiskbright * (glaring ? 1 : 1.5f));
+    // In LDR the Nishita sun disk is capped to 1; with the HDR pipeline active we keep its true
+    // (unbounded) radiance so it tonemaps and blooms as a real bright source (cf. Mitchell 2006).
+    if(!usehdr()) diskcolor.min(1);
     LOCALPARAM(sundiskcolor, diskcolor);
 
     // convert from view cosine into mu^2 for limb darkening, where mu = sqrt(1 - sin^2) and sin^2 = 1 - cos^2, thus mu^2 = 1 - (1 - cos^2*scale)
@@ -544,6 +547,182 @@ static void drawatmosphere(int w, float z1clip = 0.0f, float z2clip = 1.0f, int 
 
     xtraverts += gle::end();
 }
+
+// ---- CPU evaluation of the Nishita atmosphere, for use as a GI light source (mirrors the atmosphere shader) ----
+static struct atmolightcache
+{
+    vec betar, betam, betao, sunscale, atmoshells, sundiskcolor, mieparams, sunweight;
+    float planetradius, sundiskinvscale, coronainv;
+} atmocache;
+
+void setupatmospherelight()   // call once (single-threaded) before sampling; recomputes from the atmo vars
+{
+    atmolightcache &p = atmocache;
+    const float earthradius = 6371e3f, earthairheight = 8.4e3f, earthhazeheight = 1.25e3f, earthozoneheight = 50e3f;
+    p.planetradius = earthradius*atmoplanetsize;
+    p.atmoshells = vec(earthairheight, earthhazeheight, earthozoneheight).mul(atmoheight).add(p.planetradius).square().sub(p.planetradius*p.planetradius);
+    float gm = max(0.95f - 0.2f*atmohaze, 0.65f), miescale = pow((1-gm)*(1-gm)/(4*M_PI), -2.0f/3.0f);
+    p.mieparams = vec(miescale*(1 + gm*gm), miescale*-2*gm, 1 - (1 - cosf(0.5f*atmosundisksize*(1 - atmosundiskcorona)*RAD)));
+    static const vec lambda(680e-9f, 550e-9f, 450e-9f), k(0.686f, 0.678f, 0.666f), ozone(3.426f, 8.298f, 0.356f);
+    p.betar = vec(lambda).square().square().recip().mul(1.241e-30f/M_LN2 * atmodensity);
+    p.betam = vec(lambda).recip().square().mul(k).mul(9.072e-17f/M_LN2 * atmohaze);
+    p.betao = vec(ozone).mul(1.5e-7f/M_LN2 * atmoozone);
+    float sunoffset = sunlightdir.z*p.planetradius;
+    vec sundepth = vec(p.atmoshells).add(sunoffset*sunoffset).sqrt().sub(sunoffset);
+    vec sunweight = vec(p.betar).mul(sundepth.x).madd(p.betam, sundepth.y).madd(p.betao, sundepth.z - sundepth.x);
+    vec suncolor = atmosunlight ? atmosunlightcolor.tocolor().mul(atmosunlightscale) : sunlightcolor.tocolor().mul(sunlightscale);
+    p.sunscale = vec(suncolor).square().mul(atmobright * 16).mul(vec(sunweight).neg().exp2());
+    float maxsunweight = max(max(sunweight.x, sunweight.y), sunweight.z);
+    if(maxsunweight > 127) sunweight.mul(127/maxsunweight);
+    p.sunweight = sunweight.add(1e-4f);
+    vec zenithdepth = vec(p.atmoshells).add(p.planetradius*p.planetradius).sqrt().sub(p.planetradius);
+    vec zenithweight = vec(p.betar).mul(zenithdepth.x).madd(p.betam, zenithdepth.y).madd(p.betao, zenithdepth.z - zenithdepth.x);
+    vec zenithextinction = vec(zenithweight).sub(p.sunweight).exp2();
+    p.sundiskcolor = (atmosundisk ? atmosundiskcolor.tocolor() : suncolor).square().mul(zenithextinction).mul(atmosundiskbright * 1.5f);
+    float sundiskscale = sinf(0.5f*atmosundisksize*RAD), coronamu = 1 - (1-atmosundiskcorona)*(1-atmosundiskcorona);
+    p.sundiskinvscale = sundiskscale > 0 ? 1.0f/(sundiskscale*sundiskscale) : 0;
+    p.coronainv = 1.0f/max(coronamu, 1e-3f);
+}
+
+vec atmospherelight(const vec &camdir)   // sky+sun radiance in a direction, as display colour scaled to 0-255
+{
+    const atmolightcache &p = atmocache;
+    float costheta = camdir.dot(sunlightdir);
+    float edgeoffset = max(1 - (1 - max(costheta, 0.0f)*costheta)*p.sundiskinvscale, 0.0f);
+    float corona = min(edgeoffset*p.coronainv, 1.0f);
+    corona = max(0.75f/(1.5f - corona*corona) - 0.5f, 0.0f);
+    vec sundisk = vec(p.sundiskcolor).mul(sqrtf(edgeoffset)*corona);
+    float offset = camdir.z*p.planetradius;
+    vec depth = vec(p.atmoshells).add(offset*offset).sqrt().sub(offset);
+    vec rw = vec(p.betar).mul(depth.x), mw = vec(p.betam).mul(depth.y), ow = vec(p.betao).mul(depth.z - depth.x);
+    vec viewweight = vec(p.sunweight).sub(rw).sub(mw).sub(ow);
+    vec extinction;
+    loopk(3) { float vw = viewweight[k]; extinction[k] = fabs(vw) < 1e-4f ? float(M_LN2) : (exp2f(vw) - 1)/vw; }
+    float rphase = (1.5f + 0.5f*costheta*costheta) * (3.0f/(16.0f*M_PI));
+    float mp = 1.0f/sqrtf(p.mieparams.x + p.mieparams.y*min(costheta, p.mieparams.z));
+    vec scatter = vec(rw).mul(rphase).add(vec(mw).mul(mp*mp*mp));
+    vec inscatter = vec(p.sunscale).mul(scatter).add(sundisk).mul(extinction);
+    return vec(sqrtf(max(inscatter.x, 0.0f)), sqrtf(max(inscatter.y, 0.0f)), sqrtf(max(inscatter.z, 0.0f))).mul(255.0f);
+}
+
+// ---- CPU skybox sampling for image-based lighting (skybox as a GI light source) ----
+static ImageData *skyboxlightdata[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+
+void clearskyboxlight() { loopi(6) DELETEP(skyboxlightdata[i]); }
+bool skyboxlightloaded() { loopi(6) if(skyboxlightdata[i] && skyboxlightdata[i]->data) return true; return false; }
+
+void loadskyboxlight()   // load the 6 skybox faces' pixels into CPU memory (LDR or .hdr)
+{
+    clearskyboxlight();
+    if(!skybox[0]) return;
+    const char *wildcard = strchr(skybox, '*');
+    loopi(6)
+    {
+        const char *side = cubemapsides[i].name;
+        ImageData *d = new ImageData;
+        bool ok = false;
+        if(wildcard)
+        {
+            string name; copystring(name, makerelpath("packages", skybox));
+            char *chop = strchr(name, '*');
+            if(chop) { *chop = '\0'; concatstring(name, side); concatstring(name, wildcard+1); }
+            ok = loadimage(name, *d);
+        }
+        else loopj(3)
+        {
+            static const char * const exts[3] = { ".jpg", ".png", ".hdr" };
+            defformatstring(name, "%s_%s%s", makerelpath("packages", skybox), side, exts[j]);
+            if(loadimage(name, *d)) { ok = true; break; }
+        }
+        if(ok) skyboxlightdata[i] = d; else delete d;
+    }
+}
+
+static vec sampleskyboxtexel(int face, float s, float t)
+{
+    ImageData *d = skyboxlightdata[face];
+    if(!d || !d->data) return vec(0, 0, 0);
+    int x = clamp(int(s*d->w), 0, d->w-1), y = clamp(int(t*d->h), 0, d->h-1);
+    uchar *p = &d->data[y*d->pitch + x*d->bpp];
+    if(d->hdr) return decodergbe(p).mul(255.0f);     // RGBE -> linear 0..1+ -> 0-255 light scale
+    return vec(p[0], p[1], p[2]);
+}
+
+// direction -> skybox face + (s,t), matching how drawenvbox textures the box (Z-up world)
+static int skyboxface(const vec &dir, float &s, float &t)
+{
+    vec ad(fabs(dir.x), fabs(dir.y), fabs(dir.z));
+    int face; float a, b, inv;
+    if(ad.x >= ad.y && ad.x >= ad.z) { inv = 1/ad.x; a = dir.y*inv; b = dir.z*inv; face = dir.x < 0 ? 0 : 1; }
+    else if(ad.y >= ad.z)            { inv = 1/ad.y; a = dir.x*inv; b = dir.z*inv; face = dir.y < 0 ? 2 : 3; }
+    else                             { inv = 1/ad.z; a = dir.x*inv; b = dir.y*inv; face = dir.z < 0 ? 4 : 5; }
+    switch(face)
+    {
+        case 0: s = (a+1)*0.5f; t = (1-b)*0.5f; break;   // -X
+        case 1: s = (1-a)*0.5f; t = (1-b)*0.5f; break;   // +X
+        case 2: s = (1-a)*0.5f; t = (1-b)*0.5f; break;   // -Y
+        case 3: s = (a+1)*0.5f; t = (1-b)*0.5f; break;   // +Y
+        case 4: s = (1-b)*0.5f; t = (1-a)*0.5f; break;   // -Z
+        default:s = (1-b)*0.5f; t = (a+1)*0.5f; break;   // +Z
+    }
+    return face;
+}
+
+static vec facedir(int face, float s, float t)   // inverse of skyboxface()
+{
+    float a, b;
+    switch(face)
+    {
+        case 0: a = 2*s-1; b = 1-2*t; return vec(-1, a, b).normalize();
+        case 1: a = 1-2*s; b = 1-2*t; return vec( 1, a, b).normalize();
+        case 2: a = 1-2*s; b = 1-2*t; return vec(a, -1, b).normalize();
+        case 3: a = 2*s-1; b = 1-2*t; return vec(a,  1, b).normalize();
+        case 4: b = 1-2*s; a = 1-2*t; return vec(a, b, -1).normalize();
+        default:b = 1-2*s; a = 2*t-1; return vec(a, b,  1).normalize();
+    }
+}
+
+vec skyboxlight(const vec &dir)   // sky radiance in a direction, 0-255 light scale
+{
+    float s, t;
+    int face = skyboxface(dir, s, t);
+    return sampleskyboxtexel(face, s, t);
+}
+
+// scan the skybox for the brightest texel; returns its world direction + colour (0-255). false if no skybox.
+bool skyboxbrightest(vec &dir, vec &color)
+{
+    float best = -1;
+    loopi(6)
+    {
+        ImageData *d = skyboxlightdata[i];
+        if(!d || !d->data) continue;
+        loop(y, d->h) loop(x, d->w)
+        {
+            uchar *p = &d->data[y*d->pitch + x*d->bpp];
+            vec c = d->hdr ? decodergbe(p).mul(255.0f) : vec(p[0], p[1], p[2]);
+            float lum = c.x + c.y + c.z;
+            if(lum > best) { best = lum; color = c; dir = facedir(i, (x+0.5f)/d->w, (y+0.5f)/d->h); }
+        }
+    }
+    return best >= 0;
+}
+
+// set the sun direction (and colour) from the brightest point in the loaded skybox
+bool setsunfromskybox(bool verbose)
+{
+    loadskyboxlight();
+    vec dir, color;
+    if(!skyboxlightloaded() || !skyboxbrightest(dir, color)) { if(verbose) conoutf(CON_ERROR, "no skybox loaded (set `skybox` first)"); return false; }
+    float yaw = atan2f(-dir.x, dir.y)/RAD, pitch = asinf(clamp(dir.z, -1.0f, 1.0f))/RAD;
+    setvar("sunlightyaw", int(yaw < 0 ? yaw + 360 : yaw));
+    setvar("sunlightpitch", int(pitch));
+    int m = max(color.x, max(color.y, color.z));
+    if(m > 0) setvar("sunlight", (clamp(int(color.x*255/m), 0, 255)<<16) | (clamp(int(color.y*255/m), 0, 255)<<8) | clamp(int(color.z*255/m), 0, 255));
+    if(verbose) conoutf("skybox sun: yaw %.1f pitch %.1f  colour %.0f %.0f %.0f", yaw, pitch, color.x, color.y, color.z);
+    return true;
+}
+ICOMMAND(getskyboxsun, "", (), setsunfromskybox(true));
 
 VARP(sparklyfix, 0, 0, 1);
 VAR(showsky, 0, 1, 1);
@@ -653,7 +832,13 @@ void drawskybox(int farplane, bool limited, bool force)
 
     if(!atmo || (skybox[0] && atmoalpha < 1))
     {
-        if(glaring) SETSHADER(skyboxglare);
+        bool skyhdr = usehdr() && sky[0] && sky[0]->hdr;   // RGBE skybox faces: decode in the shader
+        if(skyhdr)
+        {
+            Shader *s = lookupshaderbyname(glaring ? "skyboxhdrglare" : "skyboxhdr");
+            if(s) s->set(); else if(glaring) SETSHADER(skyboxglare); else SETSHADER(skybox);
+        }
+        else if(glaring) SETSHADER(skyboxglare);
         else SETSHADER(skybox);
 
         gle::color(vec::hexcolor(skyboxcolour));

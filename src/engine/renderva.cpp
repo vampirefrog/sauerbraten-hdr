@@ -1077,6 +1077,16 @@ static void changebatchtmus(renderstate &cur, int pass, geombatch &b)
             changed = true;
         }
         tmu++;
+        if(b.vslot.slot->shader->type&SHADER_RNM && lightmaptexs.inrange(lmid+2))   // 3rd RNM basis lightmap
+        {
+            if(cur.textures[tmu]!=lightmaptexs[lmid+2].id)
+            {
+                glActiveTexture_(GL_TEXTURE0+tmu);
+                glBindTexture(GL_TEXTURE_2D, cur.textures[tmu] = lightmaptexs[lmid+2].id);
+                changed = true;
+            }
+            tmu++;
+        }
     }
     if(b.vslot.slot->shader->type&SHADER_ENVMAP && b.es.envmap!=EMID_CUSTOM)
     {
@@ -1124,6 +1134,7 @@ static void changeslottmus(renderstate &cur, int pass, Slot &slot, VSlot &vslot)
     }
     int tmu = 2, envmaptmu = -1;
     if(slot.shader->type&SHADER_NORMALSLMS) tmu++;
+    if(slot.shader->type&SHADER_RNM) tmu++;   // 3rd RNM basis lightmap occupies a unit before slot textures
     if(slot.shader->type&SHADER_ENVMAP) envmaptmu = tmu++;
     loopvj(slot.sts)
     {

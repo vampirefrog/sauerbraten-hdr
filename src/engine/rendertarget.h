@@ -384,7 +384,7 @@ struct rendertarget
             if(blursize) doblur(blursize, blursigma, blurysize ? blurysize : blursize);
         }
 
-        glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+        glBindFramebuffer_(GL_FRAMEBUFFER, scenefbo);   // return to the main scene buffer (hdr fbo or backbuffer)
         glViewport(0, 0, screenw, screenh);
     }
 

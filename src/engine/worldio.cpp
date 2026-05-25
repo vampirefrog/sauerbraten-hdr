@@ -986,6 +986,7 @@ bool save_world(const char *mname, bool nolms)
             renderprogress(float(i+1)/lightmaps.length(), "saving lightmaps...");
         }
         if(getnumviewcells()>0) { renderprogress(0, "saving pvs..."); savepvs(f); }
+        renderprogress(0, "saving light probes..."); savelightprobes(f);   // MAPVERSION>=34
     }
     if(shouldsaveblendmap()) { renderprogress(0, "saving blendmap..."); saveblendmap(f); }
 
@@ -1228,13 +1229,17 @@ bool load_world(const char *mname, const char *cname)        // still supports a
                     lm.unlity = f->getlil<ushort>();
                 }
             }
-            if(lm.type&LM_ALPHA && (lm.type&LM_TYPE)!=LM_BUMPMAP1) lm.bpp = 4;
+            if((lm.type&LM_TYPE)==LM_RNM0) lm.bpp = 12;   // 3 RGBE basis maps interleaved per texel
+            else if(lm.type&LM_HDR) lm.bpp = 4;           // single RGBE-encoded HDR lightmap
+            else if(lm.type&LM_ALPHA && (lm.type&LM_TYPE)!=LM_BUMPMAP1) lm.bpp = 4;
             lm.data = new uchar[lm.bpp*LM_PACKW*LM_PACKH];
             f->read(lm.data, lm.bpp * LM_PACKW * LM_PACKH);
             lm.finalize();
         }
 
         if(hdr.version >= 25 && hdr.numpvs > 0) loadpvs(f, hdr.numpvs);
+        clearlightprobes();
+        if(hdr.version >= 34) loadlightprobes(f);   // probe section written after pvs, before blendmap
         if(hdr.version >= 28 && hdr.blendmap) loadblendmap(f, hdr.blendmap);
     }
 

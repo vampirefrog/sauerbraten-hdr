@@ -1,0 +1,25 @@
+# build artifacts
+*.o
+*.d
+*.gch
+*.so
+*.a
+src/sauer_client
+src/sauer_server
+src/native_client
+src/native_server
+src/master
+
+# SVN metadata
+.svn/
+
+# stock game media (~2GB; not part of this fork — get it from upstream Sauerbraten)
+/packages/
+
+# local runtime / test data
+/run/
+/hdrhome/
+/config.cfg
+/restore.cfg
+/servers.cfg
+/init.cfg

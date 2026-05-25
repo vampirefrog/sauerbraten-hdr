@@ -349,6 +349,9 @@ extern int getwaterfog(int mat);
 extern const bvec &getlavacolor(int mat);
 extern int getlavafog(int mat);
 extern const bvec &getglasscolor(int mat);
+extern float getwateremission(int mat);
+extern float getlavaemission(int mat);
+extern float getglassemission(int mat);
 
 extern void cleanreflections();
 extern void queryreflections();
@@ -365,6 +368,23 @@ extern bool glaring;
 
 extern void drawglaretex();
 extern void addglare();
+
+// hdr
+extern GLuint scenefbo;   // framebuffer the main scene pass renders into (0 = backbuffer)
+extern bool usehdr();
+extern void setuphdr(int w, int h);
+extern void cleanuphdr(bool fullclean = true);
+extern bool beginhdr();
+extern void endhdr();
+extern void viewhdr();
+
+// lightprobes (ambient-cube grid for model lighting)
+extern bool haslightprobes();
+extern void clearlightprobes();
+extern void genlightprobes(bool force = false);
+extern void lightprobesreaching(const vec &target, vec &color, vec &dir);
+extern void savelightprobes(stream *f);
+extern void loadlightprobes(stream *f);
 
 // depthfx
 extern bool depthfxing;

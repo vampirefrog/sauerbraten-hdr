@@ -573,7 +573,8 @@ void rendermatgrid(vector<materialsurface *> &vismats)
     { \
         if(!name##colour) name##colour = 0x2080C0; \
         name##color = bvec((name##colour>>16)&0xFF, (name##colour>>8)&0xFF, name##colour&0xFF); \
-    });
+    }); \
+    FVARR(gi##name, 0, 0, 64);
 
 GLASSVARS(glass)
 GLASSVARS(glass2)
@@ -582,6 +583,8 @@ GLASSVARS(glass4)
 
 GETMATIDXVAR(glass, colour, int)
 GETMATIDXVAR(glass, color, const bvec &)
+
+float getglassemission(int mat) { switch(mat&MATF_INDEX) { default: case 0: return giglass; case 1: return giglass2; case 2: return giglass3; case 3: return giglass4; } }
 
 VARP(glassenv, 0, 1, 1);
 

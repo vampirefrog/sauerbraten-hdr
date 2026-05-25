@@ -17,6 +17,8 @@ struct lightmapworker
     bvec *raybuf;
     uchar *ambient, *blur;
     vec *colordata, *raydata;
+    vec *rnmdata[3];   // per-lumel HL2 radiosity-normal-map basis accumulators (RNM bake)
+    vec *gidata;       // per-lumel HDR sky/GI irradiance (gi bake)
     int type, bpp, w, h, orient, rotate;
     VSlot *vslot;
     Slot *slot;
@@ -78,6 +80,22 @@ VARR(lightprecision, 1, 32, 1024);
 VARR(lighterror, 1, 8, 16);
 VARR(bumperror, 1, 3, 16);
 VARR(lightlod, 0, 0, 10);
+VARR(hdrlightmaps, 0, 0, 1);   // bake HDR (RGBE) lightmaps instead of clamped 8-bit (see hdr.cpp)
+VARR(rnm, 0, 0, 1);            // bake 3-basis HL2 radiosity-normal-mapped lightmaps (implies hdrlightmaps)
+VARR(softshadows, 0, 0, 256);  // area-light soft-shadow samples per light (0/1 = hard single-ray shadows)
+FVARR(lightsize, 0, 8, 512);   // point/spot light area radius (world units) -> penumbra widens with distance
+FVARR(sunsoftness, 0, 0.5f, 16); // sun angular radius (degrees) for soft sun shadows
+
+// van der Corput radical inverse (base 2) for low-discrepancy sampling (jittered shadow/GI rays)
+static inline float radicalinverse2(uint i)
+{
+    i = (i << 16) | (i >> 16);
+    i = ((i & 0x55555555u) << 1) | ((i & 0xAAAAAAAAu) >> 1);
+    i = ((i & 0x33333333u) << 2) | ((i & 0xCCCCCCCCu) >> 2);
+    i = ((i & 0x0F0F0F0Fu) << 4) | ((i & 0xF0F0F0F0u) >> 4);
+    i = ((i & 0x00FF00FFu) << 8) | ((i & 0xFF00FF00u) >> 8);
+    return i * 2.3283064365386963e-10f;   // / 2^32
+}
 bvec ambientcolor(0x19, 0x19, 0x19), skylightcolor(0, 0, 0);
 HVARFR(ambient, 1, 0x191919, 0xFFFFFF,
 {
@@ -483,7 +501,7 @@ static void updatelightmap(const layoutinfo &surface)
         tex.unlitx = lm.unlitx;
         tex.unlity = lm.unlity;
         glGenTextures(1, &tex.id);
-        createtexture(tex.id, tex.w, tex.h, NULL, 3, 1, tex.type&LM_ALPHA ? GL_RGBA : GL_RGB);
+        createtexture(tex.id, tex.w, tex.h, NULL, 3, 1, tex.type&(LM_ALPHA|LM_HDR) ? GL_RGBA : GL_RGB);
         if((lm.type&LM_TYPE)==LM_BUMPMAP0 && lightmaps.inrange(surface.lmid+1-LMID_RESERVED))
         {
             LightMap &lm2 = lightmaps[surface.lmid+1-LMID_RESERVED];
@@ -504,7 +522,7 @@ static void updatelightmap(const layoutinfo &surface)
     glPixelStorei(GL_UNPACK_ROW_LENGTH, LM_PACKW);
 
     glBindTexture(GL_TEXTURE_2D, lightmaptexs[lm.tex].id);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, lm.offsetx + surface.x, lm.offsety + surface.y, surface.w, surface.h, lm.type&LM_ALPHA ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, &lm.data[(surface.y*LM_PACKW + surface.x)*lm.bpp]);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, lm.offsetx + surface.x, lm.offsety + surface.y, surface.w, surface.h, lm.type&(LM_ALPHA|LM_HDR) ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, &lm.data[(surface.y*LM_PACKW + surface.x)*lm.bpp]);
     if((lm.type&LM_TYPE)==LM_BUMPMAP0 && lightmaps.inrange(surface.lmid+1-LMID_RESERVED))
     {
         LightMap &lm2 = lightmaps[surface.lmid+1-LMID_RESERVED];
@@ -516,11 +534,86 @@ static void updatelightmap(const layoutinfo &surface)
 }
 
 
+// Half-Life 2 radiosity-normal-map basis (tangent space), per Mitchell 2006
+extern const vec orientation_tangent[8][3];
+extern const vec orientation_bitangent[8][3];
+static const vec hl2basis[3] =
+{
+    vec(-0.40824829f,  0.70710678f, 0.57735027f),
+    vec(-0.40824829f, -0.70710678f, 0.57735027f),
+    vec( 0.81649658f,  0.0f,        0.57735027f)
+};
+
+// build an orthonormal basis (u,v) perpendicular to dir
+static inline void perpbasis(const vec &dir, vec &u, vec &v)
+{
+    u = vec(fabs(dir.z) < 0.9f ? vec(0, 0, 1) : vec(1, 0, 0));
+    u.sub(vec(dir).mul(dir.dot(u))).normalize();
+    v.cross(dir, u);
+}
+
+// area-light visibility 0..1: jitter `softshadows` shadow rays across a disk of radius `size` at the
+// light (perpendicular to the light direction) and average occlusion. Penumbra widens with distance
+// from the caster automatically (the disk subtends a wider shadow gradient on farther receivers).
+static float lightvisibility(lightmapworker *w, const vec &target, const vec &lightpos, float size, float mag, float tolerance)
+{
+    vec dir = vec(lightpos).sub(target).mul(1.0f/mag), u, v;
+    perpbasis(dir, u, v);
+    float jit = radicalinverse2(uint(target.x*53.0f) ^ (uint(target.y*131.0f)*2654435761u) ^ uint(target.z*97.0f));
+    int hits = 0, n = max(softshadows, 1);
+    loopi(n)
+    {
+        float r = sqrtf((i + 0.5f)/n)*size, phi = 2*M_PI*(radicalinverse2(i) + jit);
+        vec lp = vec(lightpos).add(vec(u).mul(r*cosf(phi))).add(vec(v).mul(r*sinf(phi)));
+        vec sray = vec(target).sub(lp);
+        float smag = sray.magnitude();
+        if(smag < 1e-3f) { hits++; continue; }
+        sray.mul(1.0f/smag);
+        if(shadowray(w->shadowraycache, lp, sray, smag - tolerance, RAY_SHADOW | (lmshadows > 1 ? RAY_ALPHAPOLY : 0)) >= smag - tolerance) hits++;
+    }
+    return float(hits)/n;
+}
+
+// the sun's angular radius (degrees) used for soft shadows: when atmo is on, take it from the visible
+// Nishita sun disk (atmosundisksize is a diameter) so shadow penumbra matches the sky's sun; else sunsoftness
+extern int atmo;
+extern float atmosundisksize;
+static inline float sunangularradius() { return atmo ? 0.5f*atmosundisksize : sunsoftness; }
+
+// area-light visibility for the sun: jitter the shadow direction over the sun's angular disk
+static float sunvisibility(lightmapworker *w, const vec &target, float tolerance, int flags)
+{
+    vec u, v;
+    perpbasis(sunlightdir, u, v);
+    float tana = tanf(sunangularradius()*RAD), jit = radicalinverse2(uint(target.x*97.0f) ^ (uint(target.y*53.0f)*2654435761u) ^ uint(target.z*131.0f));
+    int hits = 0, n = max(softshadows, 1);
+    loopi(n)
+    {
+        float r = sqrtf((i + 0.5f)/n)*tana, phi = 2*M_PI*(radicalinverse2(i) + jit);
+        vec dir = vec(sunlightdir).add(vec(u).mul(r*cosf(phi))).add(vec(v).mul(r*sinf(phi))).normalize();
+        if(shadowray(w->shadowraycache, vec(dir).mul(tolerance).add(target), dir, 1e16f, flags) > 1e15f) hits++;
+    }
+    return float(hits)/n;
+}
+
 static uint generatelumel(lightmapworker *w, const float tolerance, uint lightmask, const vector<const extentity *> &lights, const vec &target, const vec &normal, vec &sample, int x, int y)
 {
     vec avgray(0, 0, 0);
     float r = 0, g = 0, b = 0;
     uint lightused = 0;
+    bool rnmpass = (w->type&LM_TYPE) == LM_RNM0;
+    vec rnmS(0, 0, 0), rnmT(0, 0, 0), rnmN(0, 0, 1);
+    if(rnmpass)
+    {
+        rnmS = orientation_tangent[w->rotate][dimension(w->orient)];
+        rnmT = orientation_bitangent[w->rotate][dimension(w->orient)];
+        rnmN = normal;
+        rnmN.normalize();
+        rnmN.orthonormalize(rnmS, rnmT);
+        rnmS.normalize();
+        rnmT.normalize();
+    }
+    int rnmidx = y*w->w + x;
     loopv(lights)
     {
         if(lightmask&(1<<i)) continue;
@@ -547,8 +640,13 @@ static uint generatelumel(lightmapworker *w, const float tolerance, uint lightma
         }
         if(lmshadows && mag)
         {
-            float dist = shadowray(w->shadowraycache, light.o, ray, mag - tolerance, RAY_SHADOW | (lmshadows > 1 ? RAY_ALPHAPOLY : 0));
-            if(dist < mag - tolerance) continue;
+            if(softshadows > 1 && lightsize > 0)
+            {   // area light: average visibility over the light's disk -> soft, distance-widening penumbra
+                float vis = lightvisibility(w, target, light.o, lightsize, mag, tolerance);
+                if(vis <= 0) continue;
+                attenuation *= vis;
+            }
+            else if(shadowray(w->shadowraycache, light.o, ray, mag - tolerance, RAY_SHADOW | (lmshadows > 1 ? RAY_ALPHAPOLY : 0)) < mag - tolerance) continue;
         }
         lightused |= 1<<i;
         float intensity;
@@ -565,28 +663,45 @@ static uint generatelumel(lightmapworker *w, const float tolerance, uint lightma
         r += intensity * float(light.attr2);
         g += intensity * float(light.attr3);
         b += intensity * float(light.attr4);
+        if(rnmpass)
+        {
+            vec tolight = vec(ray).neg(), Lt(rnmS.dot(tolight), rnmT.dot(tolight), rnmN.dot(tolight)),
+                lc(light.attr2, light.attr3, light.attr4);
+            loopk(3) { float wgt = hl2basis[k].dot(Lt); if(wgt > 0) w->rnmdata[k][rnmidx].add(vec(lc).mul(attenuation*wgt)); }
+        }
     }
     if(sunlight)
     {
         float angle = sunlightdir.dot(normal);
-        if(angle > 0 &&
-           (!lmshadows ||
-            shadowray(w->shadowraycache, vec(sunlightdir).mul(tolerance).add(target), sunlightdir, 1e16f, RAY_SHADOW | (lmshadows > 1 ? RAY_ALPHAPOLY : 0) | (skytexturelight ? RAY_SKIPSKY | (useskytexture ? RAY_SKYTEX : 0) : 0)) > 1e15f))
+        if(angle > 0)
         {
-            float intensity;
-            switch(w->type&LM_TYPE)
+            int sunflags = RAY_SHADOW | (lmshadows > 1 ? RAY_ALPHAPOLY : 0) | (skytexturelight ? RAY_SKIPSKY | (useskytexture ? RAY_SKYTEX : 0) : 0);
+            float sunvis = !lmshadows ? 1.0f
+                         : (softshadows > 1 && sunangularradius() > 0 ? sunvisibility(w, target, tolerance, sunflags)   // soft area sun (atmo sun size if atmo on)
+                            : (shadowray(w->shadowraycache, vec(sunlightdir).mul(tolerance).add(target), sunlightdir, 1e16f, sunflags) > 1e15f ? 1.0f : 0.0f));
+            if(sunvis > 0)
             {
-                case LM_BUMPMAP0:
-                    intensity = 1;
-                    avgray.add(sunlightdir);
-                    break;
-                default:
-                    intensity = angle;
-                    break;
+                float intensity;
+                switch(w->type&LM_TYPE)
+                {
+                    case LM_BUMPMAP0:
+                        intensity = sunvis;
+                        avgray.add(vec(sunlightdir).mul(sunvis));
+                        break;
+                    default:
+                        intensity = angle * sunvis;
+                        break;
+                }
+                r += intensity * (sunlightcolor.x*sunlightscale);
+                g += intensity * (sunlightcolor.y*sunlightscale);
+                b += intensity * (sunlightcolor.z*sunlightscale);
+                if(rnmpass)
+                {
+                    vec Lt(rnmS.dot(sunlightdir), rnmT.dot(sunlightdir), rnmN.dot(sunlightdir)),
+                        lc(sunlightcolor.x*sunlightscale*sunvis, sunlightcolor.y*sunlightscale*sunvis, sunlightcolor.z*sunlightscale*sunvis);
+                    loopk(3) { float wgt = hl2basis[k].dot(Lt); if(wgt > 0) w->rnmdata[k][rnmidx].add(vec(lc).mul(wgt)); }
+                }
             }
-            r += intensity * (sunlightcolor.x*sunlightscale);
-            g += intensity * (sunlightcolor.y*sunlightscale);
-            b += intensity * (sunlightcolor.z*sunlightscale);
         }
     }
     switch(w->type&LM_TYPE)
@@ -603,9 +718,19 @@ static uint generatelumel(lightmapworker *w, const float tolerance, uint lightma
             w->raydata[y*w->w+x].add(vec(S.dot(avgray)/S.magnitude(), T.dot(avgray)/T.magnitude(), normal.dot(avgray)));
             break;
     }
-    sample.x = min(255.0f, max(r, float(ambientcolor[0])));
-    sample.y = min(255.0f, max(g, float(ambientcolor[1])));
-    sample.z = min(255.0f, max(b, float(ambientcolor[2])));
+    if(w->type&LM_HDR)
+    {
+        // keep unbounded HDR radiance; the 255 ceiling is only an 8-bit storage limit
+        sample.x = max(r, float(ambientcolor[0]));
+        sample.y = max(g, float(ambientcolor[1]));
+        sample.z = max(b, float(ambientcolor[2]));
+    }
+    else
+    {
+        sample.x = min(255.0f, max(r, float(ambientcolor[0])));
+        sample.y = min(255.0f, max(g, float(ambientcolor[1])));
+        sample.z = min(255.0f, max(b, float(ambientcolor[2])));
+    }
     return lightused;
 }
 
@@ -624,33 +749,31 @@ static bool lumelsample(const vec &sample, int aasample, int stride)
     return false;
 }
 
+// hemisphere sampling directions shared by the sky-occlusion test and the GI gather
+static const vec hemirays[17] =
+{
+    vec(cosf(21*RAD)*cosf(50*RAD), sinf(21*RAD)*cosf(50*RAD), sinf(50*RAD)),
+    vec(cosf(111*RAD)*cosf(50*RAD), sinf(111*RAD)*cosf(50*RAD), sinf(50*RAD)),
+    vec(cosf(201*RAD)*cosf(50*RAD), sinf(201*RAD)*cosf(50*RAD), sinf(50*RAD)),
+    vec(cosf(291*RAD)*cosf(50*RAD), sinf(291*RAD)*cosf(50*RAD), sinf(50*RAD)),
+    vec(cosf(66*RAD)*cosf(70*RAD), sinf(66*RAD)*cosf(70*RAD), sinf(70*RAD)),
+    vec(cosf(156*RAD)*cosf(70*RAD), sinf(156*RAD)*cosf(70*RAD), sinf(70*RAD)),
+    vec(cosf(246*RAD)*cosf(70*RAD), sinf(246*RAD)*cosf(70*RAD), sinf(70*RAD)),
+    vec(cosf(336*RAD)*cosf(70*RAD), sinf(336*RAD)*cosf(70*RAD), sinf(70*RAD)),
+    vec(0, 0, 1),
+    vec(cosf(43*RAD)*cosf(60*RAD), sinf(43*RAD)*cosf(60*RAD), sinf(60*RAD)),
+    vec(cosf(133*RAD)*cosf(60*RAD), sinf(133*RAD)*cosf(60*RAD), sinf(60*RAD)),
+    vec(cosf(223*RAD)*cosf(60*RAD), sinf(223*RAD)*cosf(60*RAD), sinf(60*RAD)),
+    vec(cosf(313*RAD)*cosf(60*RAD), sinf(313*RAD)*cosf(60*RAD), sinf(60*RAD)),
+    vec(cosf(88*RAD)*cosf(80*RAD), sinf(88*RAD)*cosf(80*RAD), sinf(80*RAD)),
+    vec(cosf(178*RAD)*cosf(80*RAD), sinf(178*RAD)*cosf(80*RAD), sinf(80*RAD)),
+    vec(cosf(268*RAD)*cosf(80*RAD), sinf(268*RAD)*cosf(80*RAD), sinf(80*RAD)),
+    vec(cosf(358*RAD)*cosf(80*RAD), sinf(358*RAD)*cosf(80*RAD), sinf(80*RAD)),
+};
+
 static void calcskylight(lightmapworker *w, const vec &o, const vec &normal, float tolerance, uchar *skylight, int flags = RAY_ALPHAPOLY, extentity *t = NULL)
 {
-    static const vec rays[17] =
-    {
-        vec(cosf(21*RAD)*cosf(50*RAD), sinf(21*RAD)*cosf(50*RAD), sinf(50*RAD)),
-        vec(cosf(111*RAD)*cosf(50*RAD), sinf(111*RAD)*cosf(50*RAD), sinf(50*RAD)),
-        vec(cosf(201*RAD)*cosf(50*RAD), sinf(201*RAD)*cosf(50*RAD), sinf(50*RAD)),
-        vec(cosf(291*RAD)*cosf(50*RAD), sinf(291*RAD)*cosf(50*RAD), sinf(50*RAD)),
-
-        vec(cosf(66*RAD)*cosf(70*RAD), sinf(66*RAD)*cosf(70*RAD), sinf(70*RAD)),
-        vec(cosf(156*RAD)*cosf(70*RAD), sinf(156*RAD)*cosf(70*RAD), sinf(70*RAD)),
-        vec(cosf(246*RAD)*cosf(70*RAD), sinf(246*RAD)*cosf(70*RAD), sinf(70*RAD)),
-        vec(cosf(336*RAD)*cosf(70*RAD), sinf(336*RAD)*cosf(70*RAD), sinf(70*RAD)),
-
-        vec(0, 0, 1),
-
-        vec(cosf(43*RAD)*cosf(60*RAD), sinf(43*RAD)*cosf(60*RAD), sinf(60*RAD)),
-        vec(cosf(133*RAD)*cosf(60*RAD), sinf(133*RAD)*cosf(60*RAD), sinf(60*RAD)),
-        vec(cosf(223*RAD)*cosf(60*RAD), sinf(223*RAD)*cosf(60*RAD), sinf(60*RAD)),
-        vec(cosf(313*RAD)*cosf(60*RAD), sinf(313*RAD)*cosf(60*RAD), sinf(60*RAD)),
-
-        vec(cosf(88*RAD)*cosf(80*RAD), sinf(88*RAD)*cosf(80*RAD), sinf(80*RAD)),
-        vec(cosf(178*RAD)*cosf(80*RAD), sinf(178*RAD)*cosf(80*RAD), sinf(80*RAD)),
-        vec(cosf(268*RAD)*cosf(80*RAD), sinf(268*RAD)*cosf(80*RAD), sinf(80*RAD)),
-        vec(cosf(358*RAD)*cosf(80*RAD), sinf(358*RAD)*cosf(80*RAD), sinf(80*RAD)),
-
-    };
+    const vec *rays = hemirays;
     flags |= RAY_SHADOW;
     if(skytexturelight) flags |= RAY_SKIPSKY | (useskytexture ? RAY_SKYTEX : 0);
     int hit = 0;
@@ -669,6 +792,226 @@ static void calcskylight(lightmapworker *w, const vec &o, const vec &normal, flo
 static inline bool hasskylight()
 {
     return skylightcolor[0]>ambientcolor[0] || skylightcolor[1]>ambientcolor[1] || skylightcolor[2]>ambientcolor[2];
+}
+
+// ---- global illumination bake (HDR sky image-based lighting + indirect bounce) ----
+VARR(gi, 0, 0, 1);                  // bake sky IBL + indirect GI into HDR lightmaps (needs hdrlightmaps)
+VARR(gibounces, 1, 2, 4);           // number of indirect light bounces
+VARR(girays, 8, 64, 1024);          // cosine-weighted hemisphere samples per lumel (quality vs bake time)
+FVARR(giscale, 0, 1, 16);           // GI intensity
+FVARR(gialbedo, 0, 0.7f, 1);        // assumed surface reflectance for indirect bounces
+FVARR(giemissive, 0, 1, 64);        // how strongly emissive (glow) textures act as GI area light sources
+VARR(giemissivetexel, 0, 0, 1);     // 0 = per-slot average emission (fast, low-noise); 1 = sample the glow texture per-texel at the hit UV (vscale/offset/rotation matter, needs more girays)
+
+extern int atmo;
+extern vec atmospherelight(const vec &dir);
+extern bool skyboxlightloaded();
+extern vec skyboxlight(const vec &dir);
+VARR(giskybox, 0, 0, 1);   // sample the loaded skybox image (incl. its sun) as the GI light source
+
+// HDR radiance of the sky in a world direction (0-255 light scale)
+static vec skyradiance(const vec &dir)
+{
+    if(giskybox && skyboxlightloaded()) return skyboxlight(dir);   // sample the skybox image
+    if(atmo) return atmospherelight(dir);   // else sample the Nishita atmosphere
+    vec sky = hasskylight() ? vec(skylightcolor.x, skylightcolor.y, skylightcolor.z)
+                            : vec(ambientcolor.x, ambientcolor.y, ambientcolor.z);
+    if(sunlight)   // a bright HDR sun lobe toward the sun direction (sun-from-sky)
+    {
+        float d = max(dir.dot(sunlightdir), 0.0f);
+        sky.add(vec(sunlightcolor.x, sunlightcolor.y, sunlightcolor.z).mul(sunlightscale*powf(d, 16.0f)));
+    }
+    return sky;
+}
+
+// thread-safe direct-light gather at an arbitrary point/normal (uses the worker's per-task light list
+// and per-thread shadow cache). Returns incident radiance in 0-255 light scale.
+static vec gatherdirect(lightmapworker *w, const vec &target, const vec &normal)
+{
+    float r = 0, g = 0, b = 0;
+    loopv(w->lights)
+    {
+        const extentity &e = *w->lights[i];
+        vec ray = vec(target).sub(e.o);
+        float mag = ray.magnitude();
+        if(e.attr1 && mag >= float(e.attr1)) continue;
+        if(mag < 1e-4f) continue;
+        ray.div(mag);
+        float angle = -ray.dot(normal);
+        if(angle <= 0) continue;
+        float atten = e.attr1 ? 1 - mag/float(e.attr1) : 1;
+        if(shadowray(w->shadowraycache, e.o, ray, mag - 1.0f, RAY_SHADOW | RAY_POLY) < mag - 1.0f) continue;
+        float in = angle*atten;
+        r += in*e.attr2; g += in*e.attr3; b += in*e.attr4;
+    }
+    if(sunlight)
+    {
+        float angle = sunlightdir.dot(normal);
+        if(angle > 0 && shadowray(w->shadowraycache, target, sunlightdir, 1e16f, RAY_SHADOW | RAY_POLY) > 1e15f)
+        {
+            r += angle*sunlightcolor.x*sunlightscale;
+            g += angle*sunlightcolor.y*sunlightscale;
+            b += angle*sunlightcolor.z*sunlightscale;
+        }
+    }
+    return vec(r, g, b);
+}
+
+// thread-safe surface lookup at a bounce hit (lookupcube with explicit out-params + tsize 0 is read-only):
+// returns the hit surface's albedo (reflectance) and emission (so emissive textures act as GI area lights)
+static void hitsurface(const vec &hitpos, const vec &ray, vec &albedo, vec &emission)
+{
+    ivec ro;
+    int rsize;
+    cube &c = lookupcube(ivec(int(hitpos.x), int(hitpos.y), int(hitpos.z)), 0, ro, rsize);
+    vec ar(fabs(ray.x), fabs(ray.y), fabs(ray.z));
+    int dim = ar.x >= ar.y ? (ar.x >= ar.z ? 0 : 2) : (ar.y >= ar.z ? 1 : 2);
+    int orient = 2*dim + (ray[dim] > 0 ? 0 : 1);
+    VSlot &vs = lookupvslot(c.texture[orient], false);
+    // base texture reflectance * this vslot's vcolor (colorscale) -> per-surface colour bleed (red/green walls etc.)
+    albedo = vs.slot && vs.slot->albedo.x >= 0 ? vec(vs.slot->albedo).mul(vs.colorscale) : vec(gialbedo, gialbedo, gialbedo);
+    if(!vs.slot) { emission = vec(0, 0, 0); return; }
+    if(giemissivetexel && vs.slot->emissionmap)
+    {
+        // sample the actual glow pattern at the hit point's texture UV (so vscale/offset/rotation localise the emission)
+        extern void calctexgen(VSlot &vslot, int dim, vec4 &sgen, vec4 &tgen);
+        vec4 sgen, tgen;
+        calctexgen(vs, dim, sgen, tgen);
+        float s = sgen.x*hitpos.x + sgen.y*hitpos.y + sgen.z*hitpos.z + sgen.w,
+              t = tgen.x*hitpos.x + tgen.y*hitpos.y + tgen.z*hitpos.z + tgen.w;
+        s -= floor(s); t -= floor(t);   // wrap into one tile
+        int px = clamp(int(s*vs.slot->emissionw), 0, vs.slot->emissionw-1),
+            py = clamp(int(t*vs.slot->emissionh), 0, vs.slot->emissionh-1);
+        uchar *ep = &vs.slot->emissionmap[(py*vs.slot->emissionw + px)*3];
+        emission = vec(ep[0], ep[1], ep[2]).mul(giemissive);
+    }
+    else emission = vec(vs.slot->emission).mul(giemissive);   // per-slot average (uniform area emitter)
+}
+
+// Emissive material surfaces (lava/water/glass) act as GI area light sources. We collect their boundary
+// quads once at bake start, then a bounce ray that crosses one before hitting solid geometry "sees" it
+// and picks up its emitted radiance (= material colour * gilava/giwater/giglass<variant>).
+struct giemitsurf
+{
+    int dim, a0, a1;                  // plane axis + the two in-plane axes
+    float planec, lo0, hi0, lo1, hi1; // plane coord + 2D quad bounds
+    vec emission;                     // emitted radiance, 0-255 scale
+};
+static vector<giemitsurf> giemitsurfs;
+
+static void buildgiemitsurfs()
+{
+    giemitsurfs.setsize(0);
+    if(!gi) return;
+    loopv(valist)
+    {
+        vtxarray *va = valist[i];
+        loopj(va->matsurfs)
+        {
+            materialsurface &m = va->matbuf[j];
+            float emit; const bvec *col;
+            switch(m.material&MATF_VOLUME)
+            {
+                case MAT_LAVA:  emit = getlavaemission(m.material);  col = &getlavacolor(m.material);  break;
+                case MAT_WATER: emit = getwateremission(m.material); col = &getwatercolor(m.material); break;
+                case MAT_GLASS: emit = getglassemission(m.material); col = &getglasscolor(m.material); break;
+                default: continue;
+            }
+            if(emit <= 0) continue;
+            giemitsurf &e = giemitsurfs.add();
+            e.dim = dimension(m.orient);
+            e.planec = m.o[e.dim];
+            e.emission = vec(col->r, col->g, col->b).mul(emit);
+            // in-plane extents follow octa.h GENFACEVERTS: X-face -> Y=rsize,Z=csize; Y-face -> X=csize,Z=rsize; Z-face -> X=rsize,Y=csize
+            switch(e.dim)
+            {
+                case 0: e.a0 = 1; e.a1 = 2; e.lo0 = m.o.y; e.hi0 = m.o.y + m.rsize; e.lo1 = m.o.z; e.hi1 = m.o.z + m.csize; break;
+                case 1: e.a0 = 0; e.a1 = 2; e.lo0 = m.o.x; e.hi0 = m.o.x + m.csize; e.lo1 = m.o.z; e.hi1 = m.o.z + m.rsize; break;
+                default:e.a0 = 0; e.a1 = 1; e.lo0 = m.o.x; e.hi0 = m.o.x + m.rsize; e.lo1 = m.o.y; e.hi1 = m.o.y + m.csize; break;
+            }
+        }
+    }
+    if(giemitsurfs.length()) conoutf("GI: %d emissive material surface(s) (lava/water/glass)", giemitsurfs.length());
+}
+
+// nearest emissive material surface the ray crosses within (tol, maxdist); thread-safe (read-only list)
+static bool nearestgiemit(const vec &start, const vec &ray, float tol, float maxdist, vec &outemit)
+{
+    bool found = false;
+    float best = maxdist;
+    loopv(giemitsurfs)
+    {
+        giemitsurf &e = giemitsurfs[i];
+        float rd = ray[e.dim];
+        if(fabs(rd) < 1e-6f) continue;
+        float t = (e.planec - start[e.dim]) / rd;
+        if(t <= tol || t >= best) continue;
+        float p0 = start[e.a0] + ray[e.a0]*t, p1 = start[e.a1] + ray[e.a1]*t;
+        if(p0 < e.lo0 || p0 > e.hi0 || p1 < e.lo1 || p1 > e.hi1) continue;
+        best = t; outemit = e.emission; found = true;
+    }
+    return found;
+}
+
+// cosine-weighted hemisphere gather: HDR sky on unoccluded rays, multi-bounce indirect off geometry.
+// `depth` recurses up to `gibounces` levels so light bounces multiple times (true radiosity, with
+// per-surface albedo colour bleed). giscale is applied once at the top level.
+static void calcgi(lightmapworker *w, const vec &o, const vec &normal, float tolerance, vec &out, int depth)
+{
+    out = vec(0, 0, 0);
+    // match calcskylight: rays must pass THROUGH sky-textured faces (RAY_SKIPSKY) so they escape to the
+    // sky and pick up sky radiance, instead of stopping on the sky face as if it were solid geometry.
+    int flags = RAY_SHADOW | RAY_POLY;
+    if(skytexturelight) flags |= RAY_SKIPSKY | (useskytexture ? RAY_SKYTEX : 0);
+    // tangent frame around the normal for cosine-weighted hemisphere sampling
+    vec n = vec(normal).normalize();
+    vec tang(fabs(n.z) < 0.9f ? vec(0, 0, 1) : vec(1, 0, 0));
+    tang.sub(vec(n).mul(n.dot(tang))).normalize();
+    vec bitang = vec().cross(n, tang);
+    // deeper bounces are low-frequency: use far fewer samples so cost stays ~O(girays), not O(girays^bounces)
+    int n2 = depth <= 1 ? max(girays, 1) : max(girays >> (3*(depth-1)), 4);
+    // per-lumel phase jitter decorrelates the sample pattern between lumels (turns banding into noise)
+    float jitter = radicalinverse2(uint(o.x*53.0f) ^ uint(o.y*131.0f)*2654435761u ^ uint(o.z*97.0f));
+    loopi(n2)
+    {
+        float u1 = (i + 0.5f)/n2, u2 = radicalinverse2(i) + jitter;
+        u2 -= floor(u2);
+        // Malley's method: cosine-weighted direction in local hemisphere (z = normal)
+        float r = sqrtf(u1), phi = 2*M_PI*u2;
+        vec ray = vec(tang).mul(r*cosf(phi)).add(vec(bitang).mul(r*sinf(phi))).add(vec(n).mul(sqrtf(max(0.0f, 1 - u1))));
+        ray.normalize();
+        vec start = vec(ray).mul(tolerance).add(o);
+        float dist = w ? shadowray(w->shadowraycache, start, ray, 1e16f, flags)
+                       : shadowray(start, ray, 1e16f, flags);
+        vec ememit;
+        if(giemitsurfs.length() && nearestgiemit(start, ray, tolerance, dist, ememit))
+            out.add(ememit);                                   // ray sees an emissive material surface (lava/water/glass)
+        else if(dist > 1e15f) out.add(skyradiance(ray));       // open sky -> HDR sky IBL (cosine implicit)
+        else if(w)
+        {
+            vec hit = vec(ray).mul(dist).add(start);
+            // the hit surface's true (axis-aligned) face normal, NOT -ray: gatherdirect needs it for the
+            // lambert term (sunlightdir.dot(normal)) and the recursive bounce needs it to orient its hemisphere.
+            vec ar(fabs(ray.x), fabs(ray.y), fabs(ray.z));
+            int hdim = ar.x >= ar.y ? (ar.x >= ar.z ? 0 : 2) : (ar.y >= ar.z ? 1 : 2);
+            vec hitn(0, 0, 0);
+            hitn[hdim] = ray[hdim] > 0 ? -1.0f : 1.0f;
+            vec ghit = vec(hit).add(vec(hitn).mul(tolerance));  // lift off the surface to avoid self-shadow acne
+            vec inc = gatherdirect(w, ghit, hitn);             // direct light reaching the hit surface
+            if(depth < gibounces)                              // + indirect reaching it (further bounces)
+            {
+                vec ind;
+                calcgi(w, hit, hitn, tolerance, ind, depth + 1);
+                inc.add(ind);
+            }
+            vec albedo, emission;
+            hitsurface(hit, ray, albedo, emission);
+            inc.mul(albedo).add(emission);                     // reflected (colour bleed) + emitted (emissive area light)
+            out.add(inc);
+        }
+    }
+    out.mul(1.0f/n2);                                          // cosine-weighted Monte-Carlo average
+    if(depth <= 1) out.mul(giscale);
 }
 
 VARR(blurlms, 0, 0, 2);
@@ -743,6 +1086,7 @@ static bool generatelightmap(lightmapworker *w, float lpu, const lerpvert *lv, i
         offsets2[i] = vec(xstep2).mul(aacoords[i][0]).add(vec(ystep2).mul(aacoords[i][1]));
     }
     if((w->type&LM_TYPE) == LM_BUMPMAP0) memclear(w->raydata, (LM_MAXW + 4)*(LM_MAXH + 4));
+    if((w->type&LM_TYPE) == LM_RNM0) loopi(3) memclear(w->rnmdata[i], (LM_MAXW + 4)*(LM_MAXH + 4));
 
     origin1.sub(vec(ystep1).add(xstep1).mul(blurlms));
     origin2.sub(vec(ystep2).add(xstep2).mul(blurlms));
@@ -777,6 +1121,9 @@ static bool generatelightmap(lightmapworker *w, float lpu, const lerpvert *lv, i
                 else loopk(3) skylight[k] = max(skylightcolor[k], ambientcolor[k]);
             }
             else loopk(3) skylight[k] = ambientcolor[k];
+            // HDR sky image-based lighting / GI: cosine-weighted hemisphere gather (once per lumel).
+            // sky comes from gidata, so drop the flat skylight floor to ambient to avoid double-counting.
+            if(gi && (w->type&LM_HDR)) { calcgi(w, u, vec(normal).normalize(), t, w->gidata[y*w->w + x], 1); loopk(3) skylight[k] = ambientcolor[k]; }
             if(w->type&LM_ALPHA) generatealpha(w, t, u, skylight[3]);
             sample += aasample;
         }
@@ -849,7 +1196,7 @@ static bool generatelightmap(lightmapworker *w, float lpu, const lerpvert *lv, i
 
 static int finishlightmap(lightmapworker *w)
 {
-    if(hasskylight() && blurskylight && (w->w>1 || w->h>1))
+    if(hasskylight() && blurskylight && !(w->type&LM_HDR) && (w->w>1 || w->h>1))
     {
         blurtexture(blurskylight, w->bpp, w->w, w->h, w->blur, w->ambient);
         swap(w->blur, w->ambient);
@@ -860,7 +1207,7 @@ static int finishlightmap(lightmapworker *w)
           cweight = weight * (lmaa == 3 ? 5.0f : 1.0f);
     uchar *skylight = w->ambient;
     vec *ray = w->raydata;
-    uchar *dstcolor = blurlms && (w->w > 1 || w->h > 1) ? w->blur : w->colorbuf;
+    uchar *dstcolor = blurlms && !(w->type&LM_HDR) && (w->w > 1 || w->h > 1) ? w->blur : w->colorbuf;
     uchar mincolor[4] = { 255, 255, 255, 255 }, maxcolor[4] = { 0, 0, 0, 0 };
     bvec *dstray = blurlms && (w->w > 1 || w->h > 1) ? (bvec *)w->raydata : w->raybuf;
     bvec minray(255, 255, 255), maxray(0, 0, 0);
@@ -884,6 +1231,42 @@ static int finishlightmap(lightmapworker *w)
                 l.add(next[aasample+1]);
             }
 
+            if(w->type&LM_HDR)
+            {
+                // store unbounded radiance as RGBE (normalized to 0..1+); decoded in the world shader
+                vec c(max(center.x*cweight + l.x*weight, float(skylight[0])),
+                      max(center.y*cweight + l.y*weight, float(skylight[1])),
+                      max(center.z*cweight + l.z*weight, float(skylight[2])));
+                int gidx = y*w->w + x;
+                if(gi) c.add(w->gidata[gidx]);   // add HDR sky/GI irradiance
+                if((w->type&LM_TYPE) == LM_RNM0)
+                {
+                    // 3-basis radiosity normal map: scale the baked basis radiances so their +Z-weighted
+                    // average (sum/3) reproduces the Lambert diffuse c, then add ambient to each basis
+                    int idx = y*w->w + x;
+                    vec amb(skylight[0], skylight[1], skylight[2]);
+                    if(gi) amb.add(w->gidata[idx]);   // sky/GI fill into each basis
+                    // at the geometric normal the HL2-weighted basis average is rawsum/3; pick a single
+                    // (stable, clamped) scalar so that average reproduces the directional diffuse (c-amb),
+                    // then add ambient. A scalar avoids per-channel division blow-ups on coloured lights.
+                    vec rawsum = vec(w->rnmdata[0][idx]).add(w->rnmdata[1][idx]).add(w->rnmdata[2][idx]);
+                    float rawl = rawsum.x + rawsum.y + rawsum.z,
+                          dirl = max((c.x-amb.x) + (c.y-amb.y) + (c.z-amb.z), 0.0f),
+                          comp = rawl > 1.0f ? min(3.0f*dirl/rawl, 3.0f) : 0.0f;
+                    // cap a single basis at 2x overbright: keeps directional bounce HDR-ish while
+                    // preventing pile-ups of many bright lights from blowing a normal-facing texel to white
+                    float bcap = 2.0f*255.0f;
+                    loopk(3)
+                    {
+                        vec bb = vec(w->rnmdata[k][idx]).mul(comp).add(amb).min(vec(bcap, bcap, bcap));
+                        encodergbe(bb.mul(1.0f/255.0f), dstcolor + 4*k);
+                    }
+                }
+                else encodergbe(c.mul(1.0f/255.0f), dstcolor);
+                dstcolor += w->bpp;
+                skylight += w->bpp;
+                continue;
+            }
             int r = int(center.x*cweight + l.x*weight),
                 g = int(center.y*cweight + l.y*weight),
                 b = int(center.z*cweight + l.z*weight),
@@ -928,7 +1311,8 @@ static int finishlightmap(lightmapworker *w)
         }
         sample += aasample;
     }
-    if(int(maxcolor[0]) - int(mincolor[0]) <= lighterror &&
+    if(!(w->type&LM_HDR) &&
+       int(maxcolor[0]) - int(mincolor[0]) <= lighterror &&
        int(maxcolor[1]) - int(mincolor[1]) <= lighterror &&
        int(maxcolor[2]) - int(mincolor[2]) <= lighterror &&
        mincolor[3] >= maxcolor[3])
@@ -956,7 +1340,7 @@ static int finishlightmap(lightmapworker *w)
             w->lastlightmap->h = w->h = 1;
         }
     }
-    if(blurlms && (w->w>1 || w->h>1))
+    if(blurlms && !(w->type&LM_HDR) && (w->w>1 || w->h>1))
     {
         blurtexture(blurlms, w->bpp, w->w, w->h, w->colorbuf, w->blur, blurlms);
         if((w->type&LM_TYPE) == LM_BUMPMAP0) blurnormals(blurlms, w->w, w->h, w->raybuf, (const bvec *)w->raydata, blurlms);
@@ -1548,7 +1932,12 @@ static lightmapinfo *setupsurfaces(lightmapworker *w, lightmaptask &task)
         w->vslot = &vslot;
         w->type = shader->type&SHADER_NORMALSLMS ? LM_BUMPMAP0 : LM_DIFFUSE;
         if(layer) w->type |= LM_ALPHA;
-        w->bpp = w->type&LM_ALPHA ? 4 : 3;
+        if(hdrlightmaps && !(w->type&LM_ALPHA))
+        {
+            if((w->type&LM_TYPE)==LM_BUMPMAP0) { if(rnm) w->type = LM_RNM0|LM_HDR; }  // 3-basis RNM on bumped surfaces
+            else w->type |= LM_HDR;                                                   // HDR (RGBE) on flat diffuse
+        }
+        w->bpp = (w->type&LM_TYPE)==LM_RNM0 ? 12 : (w->type&(LM_ALPHA|LM_HDR) ? 4 : 3);
         w->orient = i;
         w->rotate = vslot.rotation;
         int surftype = setupsurface(w, planes, numplanes, pos, n, numverts, curlitverts);
@@ -1997,6 +2386,8 @@ lightmapworker::lightmapworker()
     blur = new uchar[4*(LM_MAXW + 4)*(LM_MAXH + 4)];
     colordata = new vec[4*(LM_MAXW+1 + 4)*(LM_MAXH+1 + 4)];
     raydata = new vec[(LM_MAXW + 4)*(LM_MAXH + 4)];
+    loopi(3) rnmdata[i] = new vec[(LM_MAXW + 4)*(LM_MAXH + 4)];
+    gidata = new vec[(LM_MAXW + 4)*(LM_MAXH + 4)];
     shadowraycache = newshadowraycache();
     blendmapcache = newblendmapcache();
     needspace = doneworking = false;
@@ -2012,6 +2403,8 @@ lightmapworker::~lightmapworker()
     delete[] blur;
     delete[] colordata;
     delete[] raydata;
+    loopi(3) delete[] rnmdata[i];
+    delete[] gidata;
     freeshadowraycache(shadowraycache);
     freeblendmapcache(blendmapcache);
 }
@@ -2148,6 +2541,21 @@ void calclight(int *quality)
     SDL_TimerID timer = SDL_AddTimer(250, calclighttimer, NULL);
     Uint32 start = SDL_GetTicks();
     calcnormals(lerptjoints > 0);
+    if(gi)   // precompute per-slot albedo (single-threaded) so the GI bounce can read it from workers
+    {
+        extern vector<Slot *> slots;
+        loopv(slots) if(slots[i]->albedo.x < 0) loadthumbnail(*slots[i]);
+        buildgiemitsurfs();                // collect emissive lava/water/glass surfaces as GI area lights
+        extern void setupatmospherelight();
+        if(atmo) setupatmospherelight();   // cache Nishita atmosphere params for sky sampling
+        if(giskybox)                       // skybox as light source: load its pixels + drive the direct sun from its brightest point
+        {
+            extern void loadskyboxlight();
+            extern bool setsunfromskybox(bool verbose);
+            loadskyboxlight();
+            setsunfromskybox(false);
+        }
+    }
     show_calclight_progress();
     setupthreads(numthreads);
     generatelightmaps(worldroot, ivec(0, 0, 0), worldsize >> 1);
@@ -2165,6 +2573,8 @@ void calclight(int *quality)
     }
     if(!editmode) compressed.clear();
     initlights();
+    // bake the ambient-cube probe grid only when opted in (genlightprobes(false) is a no-op if lightprobes is off)
+    if(!calclight_canceled) { renderbackground("generating light probes..."); genlightprobes(false); }
     renderbackground("lighting done...");
     allchanged();
     if(calclight_canceled)
@@ -2446,6 +2856,9 @@ static void findunlit(int i)
 VARF(roundlightmaptex, 0, 4, 16, { cleanuplightmaps(); initlights(); allchanged(); });
 VARF(batchlightmaps, 0, 4, 256, { cleanuplightmaps(); initlights(); allchanged(); });
 
+bool lightmapshdr = false;   // true if any loaded lightmap is RGBE/HDR (drives the world-shader decode)
+bool lightmapsrnm = false;   // true if any loaded lightmap is 3-basis RNM (drives bump-slot shader swap)
+
 void genlightmaptexs(int flagmask, int flagval)
 {
     if(lightmaptexs.length() < LMID_RESERVED) genreservedlightmaptexs();
@@ -2476,6 +2889,41 @@ void genlightmaptexs(int flagmask, int flagval)
             break;
         }
         if(!firstlm) break;
+        if(type == LM_RNM0)
+        {
+            // RNM lightmaps are bpp=12 (3 RGBE basis maps): deinterleave each into 3 consecutive RGBA8
+            // basis textures so the surface's lmid maps to lmid/+1/+2 (basis 0/1/2)
+            loopv(lightmaps)
+            {
+                LightMap &lm = lightmaps[i];
+                if(lm.tex >= 0 || (lm.type&flagmask)!=flagval || (lm.type&LM_TYPE)!=LM_RNM0) continue;
+                lm.tex = lightmaptexs.length();
+                lm.offsetx = lm.offsety = 0;
+                lightmapshdr = true;
+                lightmapsrnm = true;
+                // decode each basis from RGBE to linear and upload as fp16, so bilinear filtering is
+                // correct (interpolating RGBE bytes would spike on exponent changes between texels)
+                float *basis = new float[3*LM_PACKW*LM_PACKH];
+                loopk(3)
+                {
+                    for(int t = 0; t < LM_PACKW*LM_PACKH; t++)
+                    {
+                        vec c = decodergbe(&lm.data[t*12 + k*4]);
+                        basis[t*3] = c.x; basis[t*3+1] = c.y; basis[t*3+2] = c.z;
+                    }
+                    LightMapTexture &tex = lightmaptexs.add();
+                    tex.type = LM_RNM0|LM_HDR;
+                    tex.w = LM_PACKW;
+                    tex.h = LM_PACKH;
+                    glGenTextures(1, &tex.id);
+                    createtexture(tex.id, LM_PACKW, LM_PACKH, basis, 3, 1, GL_RGB16F, GL_TEXTURE_2D, LM_PACKW, LM_PACKH, 0, true, GL_RGB);
+                }
+                delete[] basis;
+                remaining[LM_RNM0]--;
+                total--;
+            }
+            continue;
+        }
         int used = 0, uselimit = min(remaining[type], sizelimit);
         do used++; while((1<<used) <= uselimit);
         used--;
@@ -2489,6 +2937,7 @@ void genlightmaptexs(int flagmask, int flagval)
         total -= oldval - remaining[type];
         LightMapTexture &tex = lightmaptexs.add();
         tex.type = firstlm->type;
+        if(firstlm->type&LM_HDR) lightmapshdr = true;
         tex.w = LM_PACKW<<((used+1)/2);
         tex.h = LM_PACKH<<(used/2);
         int bpp = firstlm->bpp;
@@ -2516,7 +2965,18 @@ void genlightmaptexs(int flagmask, int flagval)
         }
 
         glGenTextures(1, &tex.id);
-        createtexture(tex.id, tex.w, tex.h, data ? data : firstlm->data, 3, 1, bpp==4 ? GL_RGBA : GL_RGB);
+        uchar *src = data ? data : firstlm->data;
+        if(firstlm->type&LM_HDR)
+        {
+            // decode RGBE -> linear and upload fp16, so bilinear filtering is correct (interpolating
+            // RGBE bytes would spike on exponent changes between texels). Matches the RNM basis path.
+            int n = tex.w*tex.h;
+            float *fdata = new float[3*n];
+            loopi(n) { vec c = decodergbe(&src[i*4]); fdata[i*3] = c.x; fdata[i*3+1] = c.y; fdata[i*3+2] = c.z; }
+            createtexture(tex.id, tex.w, tex.h, fdata, 3, 1, GL_RGB16F, GL_TEXTURE_2D, tex.w, tex.h, 0, true, GL_RGB);
+            delete[] fdata;
+        }
+        else createtexture(tex.id, tex.w, tex.h, src, 3, 1, bpp==4 ? GL_RGBA : GL_RGB);
         if(data) delete[] data;
     }
 }
@@ -2535,8 +2995,11 @@ void clearlights()
     }
     shouldlightents = false;
 
-    genlightmaptexs(LM_ALPHA, 0);
-    genlightmaptexs(LM_ALPHA, LM_ALPHA);
+    lightmapshdr = false;
+    lightmapsrnm = false;
+    genlightmaptexs(LM_ALPHA|LM_HDR, 0);
+    genlightmaptexs(LM_ALPHA|LM_HDR, LM_ALPHA);
+    genlightmaptexs(LM_ALPHA|LM_HDR, LM_HDR);
     brightengeom = true;
 }
 
@@ -2573,8 +3036,18 @@ void initlights()
     }
 
     clearlightcache();
-    genlightmaptexs(LM_ALPHA, 0);
-    genlightmaptexs(LM_ALPHA, LM_ALPHA);
+    lightmapshdr = false;
+    lightmapsrnm = false;
+    genlightmaptexs(LM_ALPHA|LM_HDR, 0);
+    genlightmaptexs(LM_ALPHA|LM_HDR, LM_ALPHA);
+    genlightmaptexs(LM_ALPHA|LM_HDR, LM_HDR);
+    if(lightmapsrnm)
+    {
+        // a map baked with RNM: point bumped slots at the dedicated 3-basis RNM world shader
+        extern vector<Slot *> slots;
+        Shader *rnmsh = lookupshaderbyname("bumprnmworld");
+        if(rnmsh) loopv(slots) if(slots[i]->shader && (slots[i]->shader->type&SHADER_NORMALSLMS) && !(slots[i]->shader->type&SHADER_RNM)) slots[i]->shader = rnmsh;
+    }
     brightengeom = false;
     shouldlightents = true;
 }
@@ -2614,6 +3087,8 @@ void lightreaching(const vec &target, vec &color, vec &dir, bool fast, extentity
         dir = vec(0, 0, 1);
         return;
     }
+
+    if(haslightprobes()) { lightprobesreaching(target, color, dir); return; }   // baked ambient-cube grid
 
     color = dir = vec(0, 0, 0);
     const vector<extentity *> &ents = entities::getents();
@@ -2723,11 +3198,62 @@ void dumplms()
 {
     loopv(lightmaps)
     {
-        ImageData temp(LM_PACKW, LM_PACKH, lightmaps[i].bpp, lightmaps[i].data);
+        LightMap &lm = lightmaps[i];
         const char *map = game::getclientmap(), *name = strrchr(map, '/');
         defformatstring(buf, "lightmap_%s_%d.png", name ? name+1 : map, i);
-        savepng(buf, temp, true);
+        if(lm.type&LM_HDR)
+        {
+            // decode HDR (RGBE) / RNM (3 RGBE bases) to a viewable, tonemapped RGB image
+            ImageData out(LM_PACKW, LM_PACKH, 3);
+            loopj(LM_PACKW*LM_PACKH)
+            {
+                vec c;
+                if((lm.type&LM_TYPE)==LM_RNM0)
+                    c = vec(decodergbe(&lm.data[j*12])).add(decodergbe(&lm.data[j*12+4])).add(decodergbe(&lm.data[j*12+8])).mul(1.0f/3);
+                else c = decodergbe(&lm.data[j*4]);
+                loopk(3) out.data[j*3+k] = uchar(255.0f * (c[k] / (c[k] + 1.0f)));   // reinhard for viewing
+            }
+            savepng(buf, out, true);
+        }
+        else
+        {
+            ImageData temp(LM_PACKW, LM_PACKH, lm.bpp, lm.data);
+            savepng(buf, temp, true);
+        }
     }
 }
 
 COMMAND(dumplms, "");
+
+// DEBUG: overwrite every lightmap with a distinct solid colour and re-upload. If world surfaces then
+// show these colours, the lightmaps ARE being sampled; if they stay unchanged (e.g. white/fullbright),
+// the lighting is not coming from the lightmaps (check `fullbright 0`, brightengeom, lmid binding).
+ICOMMAND(debuglm, "", (),
+{
+    loopv(lightmaps)
+    {
+        LightMap &lm = lightmaps[i];
+        int cr = (i*101 + 40)%256;
+        int cg = (i*53 + 90)%256;
+        int cb = (i*197 + 10)%256;
+        loopj(LM_PACKW*LM_PACKH)
+        {
+            if(lm.type&LM_HDR)
+            {
+                vec c(cr/255.0f, cg/255.0f, cb/255.0f);
+                if((lm.type&LM_TYPE)==LM_RNM0) loopk(3) encodergbe(c, &lm.data[j*12 + 4*k]);
+                else encodergbe(c, &lm.data[j*4]);
+            }
+            else
+            {
+                lm.data[j*lm.bpp] = cr;
+                if(lm.bpp > 1) lm.data[j*lm.bpp + 1] = cg;
+                if(lm.bpp > 2) lm.data[j*lm.bpp + 2] = cb;
+                if(lm.bpp > 3) lm.data[j*lm.bpp + 3] = 255;
+            }
+        }
+    }
+    cleanuplightmaps();
+    initlights();
+    conoutf("debuglm: filled %d lightmaps with solid debug colours", lightmaps.length());
+});

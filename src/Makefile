@@ -94,6 +94,8 @@ CLIENT_OBJS= \
 	engine/decal.o \
 	engine/dynlight.o \
 	engine/glare.o \
+	engine/hdr.o \
+	engine/lightprobes.o \
 	engine/grass.o \
 	engine/lightmap.o \
 	engine/main.o \

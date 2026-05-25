@@ -28,16 +28,40 @@ struct PackNode
     bool insert(ushort &tx, ushort &ty, ushort tw, ushort th);
 };
 
-enum 
-{ 
-    LM_DIFFUSE = 0, 
-    LM_BUMPMAP0, 
-    LM_BUMPMAP1, 
+enum
+{
+    LM_DIFFUSE = 0,
+    LM_BUMPMAP0,
+    LM_BUMPMAP1,
+    LM_RNM0,           // HL2 radiosity-normal-map basis 0 (HDR, see hdr.cpp / Mitchell 2006)
+    LM_RNM1,           // basis 1
+    LM_RNM2,           // basis 2
     LM_TYPE = 0x0F,
 
-    LM_ALPHA = 1<<4,  
-    LM_FLAGS = 0xF0 
+    LM_ALPHA = 1<<4,
+    LM_HDR   = 1<<5,   // pixel data is RGBE-encoded HDR (4 bpp); decoded to linear in the world shader
+    LM_FLAGS = 0xF0
 };
+
+// Ward shared-exponent RGBE: pack an unbounded linear-HDR colour into 4 unsigned bytes.
+static inline void encodergbe(const vec &c, uchar *dst)
+{
+    float m = max(c.x, max(c.y, c.z));
+    if(m <= 1e-6f) { dst[0] = dst[1] = dst[2] = dst[3] = 0; return; }
+    int e;
+    float f = frexp(m, &e)*256.0f/m;   // f = 256*mantissa/m, e = exponent
+    dst[0] = uchar(clamp(c.x*f, 0.0f, 255.0f));
+    dst[1] = uchar(clamp(c.y*f, 0.0f, 255.0f));
+    dst[2] = uchar(clamp(c.z*f, 0.0f, 255.0f));
+    dst[3] = uchar(clamp(e + 128, 0, 255));
+}
+
+static inline vec decodergbe(const uchar *src)
+{
+    if(!src[3]) return vec(0, 0, 0);
+    float f = ldexp(1.0f, int(src[3]) - 128 - 8);
+    return vec(src[0]*f, src[1]*f, src[2]*f);
+}
 
 struct LightMap
 {

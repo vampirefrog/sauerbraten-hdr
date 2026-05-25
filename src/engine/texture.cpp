@@ -1058,6 +1058,8 @@ static Texture *newtexture(Texture *t, const char *rname, ImageData &s, int clam
         return t;
     }
 
+    if(s.hdr) { mipit = false; t->mipmap = false; t->hdr = true; }   // RGBE bytes: no mip averaging, decode in shader
+
     bool swizzle = !(clamp&0x10000);
     GLenum format;
     if(s.compressed)
@@ -1343,6 +1345,72 @@ bool canloadsurface(const char *name)
     return true;
 }
 
+// Radiance .hdr (RGBE) reader. Produces a bpp==4 RGBE ImageData flagged hdr; the bytes upload as a
+// plain RGBA8 texture and are decoded to linear HDR in the sampling shader (skybox / world).
+bool loadhdr(const char *name, ImageData &d)
+{
+    stream *f = openfile(path(name, true), "rb");
+    if(!f) return false;
+
+    // header: lines until a blank line, then the resolution line
+    string line;
+    bool isrgbe = false;
+    for(;;)
+    {
+        int n = 0;
+        for(int c = f->getchar(); c!='\n' && c!=EOF && n+1 < (int)sizeof(line); c = f->getchar()) line[n++] = c;
+        line[n] = '\0';
+        if(n >= 2 && (!strncmp(line, "#?", 2))) isrgbe = true;
+        if(!n) break;                       // blank line ends the header
+    }
+    int n = 0;
+    for(int c = f->getchar(); c!='\n' && c!=EOF && n+1 < (int)sizeof(line); c = f->getchar()) line[n++] = c;
+    line[n] = '\0';
+    int w = 0, h = 0;
+    if(sscanf(line, "-Y %d +X %d", &h, &w) != 2)   // only the common orientation is supported
+    {
+        conoutf(CON_ERROR, "unsupported .hdr orientation: %s", name);
+        delete f;
+        return false;
+    }
+    if(w <= 0 || h <= 0 || w > (1<<13) || h > (1<<13)) { delete f; return false; }
+
+    d.setdata(NULL, w, h, 4);
+    d.hdr = true;
+    uchar *dst = d.data;
+    uchar *scan = new uchar[w*4];
+    bool ok = true;
+    loopj(h)
+    {
+        int r = f->getchar(), g = f->getchar(), b = f->getchar(), e = f->getchar();
+        if(e==EOF) { ok = false; break; }
+        if(r==2 && g==2 && !((b<<8|e) ^ w) && w >= 8 && w < 32768)
+        {
+            // new-style adaptive RLE: 4 separately-RLE-encoded channels
+            loopi(4)
+            {
+                for(int x = 0; x < w;)
+                {
+                    int code = f->getchar();
+                    if(code > 128) { int val = f->getchar(); int run = code&127; while(run-- && x < w) scan[(x++)*4+i] = val; }
+                    else { int run = code; while(run-- && x < w) scan[(x++)*4+i] = f->getchar(); }
+                }
+            }
+        }
+        else
+        {
+            // flat / old-style: first pixel already read, then read the rest raw
+            scan[0] = r; scan[1] = g; scan[2] = b; scan[3] = e;
+            for(int x = 1; x < w; x++) { scan[x*4] = f->getchar(); scan[x*4+1] = f->getchar(); scan[x*4+2] = f->getchar(); scan[x*4+3] = f->getchar(); }
+        }
+        memcpy(&dst[j*w*4], scan, w*4);
+    }
+    delete[] scan;
+    delete f;
+    if(!ok) return false;
+    return true;
+}
+
 SDL_Surface *loadsurface(const char *name)
 {
     SDL_Surface *s = NULL;
@@ -1450,6 +1518,11 @@ static bool texturedata(ImageData &d, const char *tname, Slot::Tex *tex = NULL, 
         if(d.data && !d.compressed && !dds && compress) *compress = scaledds;
     }
         
+    if(!d.data && flen >= 4 && !strcasecmp(file + flen - 4, ".hdr"))
+    {
+        if(!loadhdr(file, d)) { if(msg) conoutf(CON_ERROR, "could not load HDR texture %s", file); return false; }
+    }
+
     if(!d.data)
     {
         SDL_Surface *s = NULL;
@@ -2453,12 +2526,70 @@ Texture *loadthumbnail(Slot &slot)
         if(!s.data) t = slot.thumbnail = notexture;
         else
         {
-            if(vslot.colorscale != vec(1, 1, 1)) texmad(s, vslot.colorscale, vec(0, 0, 0));
             int xs = s.w, ys = s.h;
             if(s.w > 64 || s.h > 64) scaleimage(s, min(s.w, 64), min(s.h, 64));
+            if(slot.albedo.x < 0 && s.data && s.bpp >= 3)   // RAW average diffuse reflectance for GI bounces;
+            {                                               // per-vslot vcolor (colorscale) is applied at bounce time
+                double ar = 0, ag = 0, ab = 0;
+                loop(y, s.h) { uchar *row = &s.data[y*s.pitch]; loop(x, s.w) { uchar *p = &row[x*s.bpp]; ar += p[0]; ag += p[1]; ab += p[2]; } }
+                int n = s.w*s.h;
+                if(n) slot.albedo = vec(float(ar/n), float(ag/n), float(ab/n)).mul(1.0f/255);
+            }
+            if(vslot.colorscale != vec(1, 1, 1)) texmad(s, vslot.colorscale, vec(0, 0, 0));
             if(g.data)
             {
+                // average emitted radiance (so emissive textures light the scene via GI). A *colored* glow map
+                // specifies the emitted colour directly; a *grayscale* glow map is just an intensity mask, so the
+                // emitted colour follows the texture's own (glow-weighted) diffuse colour -> it conforms to the texture.
                 if(g.w != s.w || g.h != s.h) scaleimage(g, s.w, s.h);
+                double er = 0, eg = 0, eb = 0;           // glow map average
+                double dr = 0, dg = 0, db = 0, wsum = 0; // glow-luminance-weighted diffuse colour
+                int gn = g.w*g.h;
+                loop(y, g.h)
+                {
+                    uchar *grow = &g.data[y*g.pitch], *srow = s.data ? &s.data[y*s.pitch] : NULL;
+                    loop(x, g.w)
+                    {
+                        uchar *gp = &grow[x*g.bpp];
+                        float gl;
+                        if(g.bpp >= 3) { er += gp[0]; eg += gp[1]; eb += gp[2]; gl = (int(gp[0])+gp[1]+gp[2])/3.0f; }
+                        else { er += gp[0]; eg += gp[0]; eb += gp[0]; gl = gp[0]; }
+                        if(srow && s.bpp >= 3) { uchar *sp = &srow[x*s.bpp]; dr += sp[0]*gl; dg += sp[1]*gl; db += sp[2]*gl; wsum += gl; }
+                    }
+                }
+                bool grayglow = false;
+                if(gn)
+                {
+                    vec glowavg(er/gn, eg/gn, eb/gn);   // 0-255
+                    float mx = max(glowavg.x, max(glowavg.y, glowavg.z)), mn = min(glowavg.x, min(glowavg.y, glowavg.z));
+                    grayglow = mx >= 1 && mx-mn < 0.08f*mx && wsum > 0;   // glow carries no real colour -> intensity mask
+                    if(grayglow)   // emitted colour follows the (glow-weighted) diffuse so it conforms to the texture
+                        slot.emission = vec(dr/wsum, dg/wsum, db/wsum).mul((glowavg.x+glowavg.y+glowavg.z)/(3*255.0f)).mul(vec(vslot.glowcolor));
+                    else           // colored glow map -> emit its colour directly
+                        slot.emission = glowavg.mul(vec(vslot.glowcolor));
+                }
+                // per-texel emitted radiance (so per-texel emissive GI can sample the actual glow pattern at a hit's UV).
+                // built from the pure diffuse, BEFORE addglow() bakes the glow into s.
+                DELETEA(slot.emissionmap);
+                slot.emissionw = s.w; slot.emissionh = s.h;
+                slot.emissionmap = new uchar[s.w*s.h*3];
+                loop(y, g.h)
+                {
+                    uchar *grow = &g.data[y*g.pitch], *srow = s.data ? &s.data[y*s.pitch] : NULL, *erow = &slot.emissionmap[y*s.w*3];
+                    loop(x, g.w)
+                    {
+                        uchar *gp = &grow[x*g.bpp];
+                        float gr, gg, gb;
+                        if(g.bpp >= 3) { gr = gp[0]; gg = gp[1]; gb = gp[2]; }
+                        else { gr = gg = gb = gp[0]; }
+                        vec e;
+                        if(grayglow && srow && s.bpp >= 3) { uchar *sp = &srow[x*s.bpp]; e = vec(sp[0], sp[1], sp[2]).mul((gr+gg+gb)/(3*255.0f)); }
+                        else e = vec(gr, gg, gb);
+                        e.mul(vec(vslot.glowcolor));
+                        uchar *ep = &erow[x*3];
+                        ep[0] = uchar(clamp(int(e.x), 0, 255)); ep[1] = uchar(clamp(int(e.y), 0, 255)); ep[2] = uchar(clamp(int(e.z), 0, 255));
+                    }
+                }
                 addglow(s, g, vslot.glowcolor);
             }
             if(l.data)
@@ -3567,6 +3698,8 @@ void saveimage(const char *filename, int format, ImageData &image, bool flip = f
 
 bool loadimage(const char *filename, ImageData &image)
 {
+    int len = strlen(filename);
+    if(len >= 4 && !strcasecmp(filename + len - 4, ".hdr")) return loadhdr(filename, image);   // Radiance HDR
     SDL_Surface *s = loadsurface(path(filename, true));
     if(!s) return false;
     image.wrap(s);
