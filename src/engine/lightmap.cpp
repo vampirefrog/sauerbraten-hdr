@@ -802,6 +802,8 @@ FVARR(giscale, 0, 1, 16);           // GI intensity
 FVARR(gialbedo, 0, 0.7f, 1);        // assumed surface reflectance for indirect bounces
 FVARR(giemissive, 0, 1, 64);        // how strongly emissive (glow) textures act as GI area light sources
 VARR(giemissivetexel, 0, 0, 1);     // 0 = per-slot average emission (fast, low-noise); 1 = sample the glow texture per-texel at the hit UV (vscale/offset/rotation matter, needs more girays)
+VARR(giemitdirect, 0, 1, 1);        // 1 = explicit area-light sampling of emissive surfaces (Source/VRAD texlight style: smooth, no grazing cutoff); 0 = old hemisphere-gather capture (noisy)
+FVARR(giemitcell, 1, 16, 256);      // emissive-surface subdivision cell size (world units) for the area-light form factor (smaller = more accurate near field, slower)
 
 extern int atmo;
 extern vec atmospherelight(const vec &dir);
@@ -954,6 +956,108 @@ static bool nearestgiemit(const vec &start, const vec &ray, float tol, float max
     return found;
 }
 
+// ---- Explicit emissive area-light sampling (Source/VRAD "texlight" style) ----
+// Instead of hoping hemisphere rays hit an emitter (noisy, grazing cutoff), collect every emissive surface
+// as a set of area samples and integrate each one's form factor + visibility at the receiver. Smooth, no
+// variance. The list is built single-threaded before the workers, so it's read-only/thread-safe in the bake.
+struct giemitter { vec center, normal, radiance; float area; };
+static vector<giemitter> giemitters;
+
+static void addemitter(const vec corner[4], const vec &cubecenter, const vec &radiance)
+{
+    vec u = vec(corner[1]).sub(corner[0]), v = vec(corner[3]).sub(corner[0]);
+    vec nrm = vec().cross(u, v);
+    float area = nrm.magnitude();
+    if(area < 1e-3f) return;
+    nrm.mul(1.0f/area);
+    vec facecenter = vec(corner[0]).add(corner[1]).add(corner[2]).add(corner[3]).mul(0.25f);
+    if(nrm.dot(vec(facecenter).sub(cubecenter)) < 0) nrm.neg();   // emit outward, away from the solid
+    float lu = u.magnitude(), lv = v.magnitude();
+    int nu = clamp(int(ceilf(lu/max(giemitcell, 1.0f))), 1, 8), nv = clamp(int(ceilf(lv/max(giemitcell, 1.0f))), 1, 8);
+    float cellarea = area/(nu*nv);
+    loop(b, nv) loop(a, nu)
+    {
+        giemitter &e = giemitters.add();
+        e.center = vec(corner[0]).add(vec(u).mul((a+0.5f)/nu)).add(vec(v).mul((b+0.5f)/nv));
+        e.normal = nrm;
+        e.radiance = radiance;
+        e.area = cellarea;
+    }
+}
+
+// collect emissive-textured cube faces into area emitters (mirrors generatelightmaps' visible-face walk)
+static void collectemissivefaces(cube *c, const ivec &co, int size)
+{
+    loopi(8)
+    {
+        ivec o(i, co, size);
+        if(c[i].children) { collectemissivefaces(c[i].children, o, size>>1); continue; }
+        if(isempty(c[i])) continue;
+        loopj(6)
+        {
+            if(c[i].texture[j] == DEFAULT_SKY) continue;
+            VSlot &vs = lookupvslot(c[i].texture[j], false);
+            if(!vs.slot || vs.slot->emission.x + vs.slot->emission.y + vs.slot->emission.z <= 0) continue;
+            if(!visibletris(c[i], j, o, size)) continue;
+            ivec v[4];
+            genfaceverts(c[i], j, v);
+            vec corner[4];
+            loopk(4) corner[k] = vec(o).add(vec(v[k]).mul(size/8.0f));
+            vec radiance = vec(vs.slot->emission).mul(vs.colorscale).mul(giemissive);
+            addemitter(corner, vec(o).add(vec(size, size, size).mul(0.5f)), radiance);
+        }
+    }
+}
+
+static void buildgiemitters()
+{
+    giemitters.setsize(0);
+    if(!gi || !giemitdirect) return;
+    extern cube *worldroot;
+    extern int worldsize;
+    collectemissivefaces(worldroot, ivec(0, 0, 0), worldsize>>1);   // emissive textures
+    loopv(giemitsurfs)                                              // emissive materials (lava/water/glass) as quads
+    {
+        giemitsurf &m = giemitsurfs[i];
+        // reconstruct the quad corners from the material surface's plane + 2D bounds
+        vec c0, c1, c3; int d = m.dim;
+        c0[d] = c1[d] = c3[d] = m.planec;
+        c0[m.a0] = m.lo0; c0[m.a1] = m.lo1;
+        c1[m.a0] = m.hi0; c1[m.a1] = m.lo1;
+        c3[m.a0] = m.lo0; c3[m.a1] = m.hi1;
+        vec corner[4] = { c0, c1, vec(), c3 };
+        corner[2][d] = m.planec; corner[2][m.a0] = m.hi0; corner[2][m.a1] = m.hi1;
+        vec center((m.lo0+m.hi0)*0.5f, (m.lo1+m.hi1)*0.5f, 0); // approximate (pushed off-plane below)
+        addemitter(corner, vec(corner[0]).add(corner[2]).mul(0.5f).sub(vec(m.dim==0?1:0, m.dim==1?1:0, m.dim==2?1:0)), m.emission);
+    }
+    if(giemitters.length()) conoutf("GI: %d emissive area-light samples", giemitters.length());
+}
+
+// explicit emissive irradiance at a receiver point/normal: sum each emitter's form factor * visibility
+static vec gatheremissive(lightmapworker *w, const vec &x, const vec &n, float tol)
+{
+    vec sum(0, 0, 0);
+    loopv(giemitters)
+    {
+        giemitter &e = giemitters[i];
+        vec d = vec(e.center).sub(x);
+        float r2 = d.squaredlen();
+        if(r2 < 1e-3f) continue;
+        float rinv = 1.0f/sqrtf(r2);
+        vec dir = vec(d).mul(rinv);
+        float cosR = dir.dot(n);
+        if(cosR <= 0) continue;
+        float cosE = -dir.dot(e.normal);
+        if(cosE <= 0) continue;
+        float dist = sqrtf(r2), maxd = dist - 2*tol;
+        if(maxd <= 0) continue;
+        vec start = vec(dir).mul(tol).add(x);
+        if(shadowray(w->shadowraycache, start, dir, maxd, RAY_SHADOW|RAY_POLY) < maxd) continue;   // occluded
+        sum.add(vec(e.radiance).mul(cosR*cosE*e.area/(M_PI*r2)));
+    }
+    return sum;
+}
+
 // cosine-weighted hemisphere gather: HDR sky on unoccluded rays, multi-bounce indirect off geometry.
 // `depth` recurses up to `gibounces` levels so light bounces multiple times (true radiosity, with
 // per-surface albedo colour bleed). giscale is applied once at the top level.
@@ -985,8 +1089,8 @@ static void calcgi(lightmapworker *w, const vec &o, const vec &normal, float tol
         float dist = w ? shadowray(w->shadowraycache, start, ray, 1e16f, flags)
                        : shadowray(start, ray, 1e16f, flags);
         vec ememit;
-        if(giemitsurfs.length() && nearestgiemit(start, ray, tolerance, dist, ememit))
-            out.add(ememit);                                   // ray sees an emissive material surface (lava/water/glass)
+        if(!giemitdirect && giemitsurfs.length() && nearestgiemit(start, ray, tolerance, dist, ememit))
+            out.add(ememit);                                   // (gather mode) ray sees an emissive material surface
         else if(dist > 1e15f) out.add(skyradiance(ray));       // open sky -> HDR sky IBL (cosine implicit)
         else if(w)
         {
@@ -1007,11 +1111,14 @@ static void calcgi(lightmapworker *w, const vec &o, const vec &normal, float tol
             }
             vec albedo, emission;
             hitsurface(hit, ray, albedo, emission);
-            inc.mul(albedo).add(emission);                     // reflected (colour bleed) + emitted (emissive area light)
+            inc.mul(albedo);                                   // reflected (colour bleed)
+            if(!giemitdirect) inc.add(emission);               // (gather mode) emitted; explicit mode handles emission below
             out.add(inc);
         }
     }
     out.mul(1.0f/n2);                                          // cosine-weighted Monte-Carlo average
+    // explicit emissive area lights (deterministic; recursion propagates it as indirect emissive too)
+    if(giemitdirect && w && giemitters.length()) out.add(gatheremissive(w, o, n, tolerance));
     if(depth <= 1) out.mul(giscale);
 }
 
@@ -2554,7 +2661,8 @@ void calclight(int *quality)
         extern vector<Slot *> slots;
         extern void computeslotlighting(Slot &slot);
         loopv(slots) computeslotlighting(*slots[i]);   // per-slot albedo + emission (cache-independent, always reliable)
-        buildgiemitsurfs();                // collect emissive lava/water/glass surfaces as GI area lights
+        buildgiemitsurfs();                // collect emissive lava/water/glass surfaces (gather mode)
+        buildgiemitters();                 // collect emissive textures + materials as explicit area lights (giemitdirect)
         extern void setupatmospherelight();
         if(atmo) setupatmospherelight();   // cache Nishita atmosphere params for sky sampling
         if(giskybox && !atmo)              // skybox as light source: load its pixels + drive the direct sun from its brightest point (atmo overrides it)
