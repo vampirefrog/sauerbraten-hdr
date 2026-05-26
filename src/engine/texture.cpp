@@ -2476,6 +2476,74 @@ void linkslotshaders()
     }
 }
 
+// Compute a slot's average diffuse reflectance (albedo) and emitted radiance (emission + per-texel
+// emissionmap) for GI. Runs INDEPENDENTLY of the thumbnail cache, so the bake always computes it. (Relying
+// on loadthumbnail was unreliable: it early-returns on a cached thumbnail, so an emissive texture could
+// silently stop emitting on a re-bake or once another slot had cached the same thumbnail.)
+void computeslotlighting(Slot &slot)
+{
+    if(slot.albedo.x >= 0 || !slot.variants || slot.sts.empty()) return;
+    VSlot &vslot = *slot.variants;
+    linkslotshader(slot, false);
+    linkvslotshader(vslot, false);   // ensure vslot.glowcolor is valid
+    int glow = -1;
+    if(slot.texmask&(1<<TEX_GLOW)) loopvj(slot.sts) if(slot.sts[j].type==TEX_GLOW) { glow = j; break; }
+    ImageData s, g;
+    texturedata(s, NULL, &slot.sts[0], false);
+    if(!s.data || s.bpp < 3) { slot.albedo = vec(0.5f, 0.5f, 0.5f); return; }   // mark done with a neutral fallback
+    if(s.w > 64 || s.h > 64) scaleimage(s, min(s.w, 64), min(s.h, 64));
+    double ar = 0, ag = 0, ab = 0;
+    loop(y, s.h) { uchar *row = &s.data[y*s.pitch]; loop(x, s.w) { uchar *p = &row[x*s.bpp]; ar += p[0]; ag += p[1]; ab += p[2]; } }
+    int n = s.w*s.h;
+    slot.albedo = vec(float(ar/n), float(ag/n), float(ab/n)).mul(1.0f/255);   // raw; per-vslot vcolor applied at bounce
+    if(glow < 0) return;
+    texturedata(g, NULL, &slot.sts[glow], false);
+    if(!g.data) return;
+    if(g.w != s.w || g.h != s.h) scaleimage(g, s.w, s.h);
+    double er = 0, eg = 0, eb = 0, dr = 0, dg = 0, db = 0, wsum = 0;
+    int gn = g.w*g.h;
+    loop(y, g.h)
+    {
+        uchar *grow = &g.data[y*g.pitch], *srow = &s.data[y*s.pitch];
+        loop(x, g.w)
+        {
+            uchar *gp = &grow[x*g.bpp];
+            float gl;
+            if(g.bpp >= 3) { er += gp[0]; eg += gp[1]; eb += gp[2]; gl = (int(gp[0])+gp[1]+gp[2])/3.0f; }
+            else { er += gp[0]; eg += gp[0]; eb += gp[0]; gl = gp[0]; }
+            if(s.bpp >= 3) { uchar *sp = &srow[x*s.bpp]; dr += sp[0]*gl; dg += sp[1]*gl; db += sp[2]*gl; wsum += gl; }
+        }
+    }
+    bool grayglow = false;
+    if(gn)
+    {
+        vec glowavg(er/gn, eg/gn, eb/gn);
+        float mx = max(glowavg.x, max(glowavg.y, glowavg.z)), mn = min(glowavg.x, min(glowavg.y, glowavg.z));
+        grayglow = mx >= 1 && mx-mn < 0.08f*mx && wsum > 0;
+        if(grayglow) slot.emission = vec(dr/wsum, dg/wsum, db/wsum).mul((glowavg.x+glowavg.y+glowavg.z)/(3*255.0f)).mul(vec(vslot.glowcolor));
+        else slot.emission = glowavg.mul(vec(vslot.glowcolor));
+    }
+    DELETEA(slot.emissionmap);
+    slot.emissionw = s.w; slot.emissionh = s.h;
+    slot.emissionmap = new uchar[s.w*s.h*3];
+    loop(y, g.h)
+    {
+        uchar *grow = &g.data[y*g.pitch], *srow = &s.data[y*s.pitch], *erow = &slot.emissionmap[y*s.w*3];
+        loop(x, g.w)
+        {
+            uchar *gp = &grow[x*g.bpp];
+            float gr, gg, gb;
+            if(g.bpp >= 3) { gr = gp[0]; gg = gp[1]; gb = gp[2]; } else { gr = gg = gb = gp[0]; }
+            vec e;
+            if(grayglow && s.bpp >= 3) { uchar *sp = &srow[x*s.bpp]; e = vec(sp[0], sp[1], sp[2]).mul((gr+gg+gb)/(3*255.0f)); }
+            else e = vec(gr, gg, gb);
+            e.mul(vec(vslot.glowcolor));
+            uchar *ep = &erow[x*3];
+            ep[0] = uchar(clamp(int(e.x), 0, 255)); ep[1] = uchar(clamp(int(e.y), 0, 255)); ep[2] = uchar(clamp(int(e.z), 0, 255));
+        }
+    }
+}
+
 Texture *loadthumbnail(Slot &slot)
 {
     if(slot.thumbnail) return slot.thumbnail;

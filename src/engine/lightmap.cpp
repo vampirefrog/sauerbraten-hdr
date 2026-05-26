@@ -1543,7 +1543,9 @@ static bool findlights(lightmapworker *w, int cx, int cy, int cz, int size, cons
         }
     }
     if(vslot.layer && (setblendmaporigin(w->blendmapcache, ivec(cx, cy, cz), size) || slot.layermask)) return true;
-    return w->lights.length() || hasskylight() || sunlight;
+    // with GI on, every surface receives indirect light (sky IBL, colour bleed, emissive textures/materials),
+    // so it needs a lightmap even with no direct light/sky/sun (e.g. an emissive-only scene).
+    return w->lights.length() || hasskylight() || sunlight || (gi && hdrlightmaps);
 }
 
 static int packlightmaps(lightmapworker *w = NULL)
@@ -2550,7 +2552,8 @@ void calclight(int *quality)
     if(gi)   // precompute per-slot albedo (single-threaded) so the GI bounce can read it from workers
     {
         extern vector<Slot *> slots;
-        loopv(slots) if(slots[i]->albedo.x < 0) loadthumbnail(*slots[i]);
+        extern void computeslotlighting(Slot &slot);
+        loopv(slots) computeslotlighting(*slots[i]);   // per-slot albedo + emission (cache-independent, always reliable)
         buildgiemitsurfs();                // collect emissive lava/water/glass surfaces as GI area lights
         extern void setupatmospherelight();
         if(atmo) setupatmospherelight();   // cache Nishita atmosphere params for sky sampling
