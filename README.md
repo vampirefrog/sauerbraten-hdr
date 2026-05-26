@@ -107,6 +107,12 @@ players, the HUD weapon) from it instead of per-frame ray casts.
 
 `lightprobes 0` (or a map with no baked grid) falls back to the stock runtime model-lighting path.
 
+### Model / viewmodel brightness
+Correct lighting makes a dark-skinned weapon read near-black against an HDR-bright world — physically right but
+poor for a first-person weapon, so games boost the viewmodel. `modelbright` / `modelminbright` multiply / floor
+the lighting of **all** dynamic models; `hudgunbright` / `hudgunminbright` do the same on top for just the
+first-person weapon. All default to 1/0 (no change, physically correct); raise them to make models pop.
+
 ### Sky as a light source
 - `atmo 1` makes the procedural Nishita atmosphere drive the GI bake (blue sky fill + warm sun).
 - `giskybox 1` instead samples a loaded skybox image (LDR or `.hdr`) as the GI light, and drives the direct
@@ -141,6 +147,8 @@ All new vars default to off/stock. "per-map" vars are bake-time and saved in the
 | `giemitdirect` / `giemitcell` | 1 / 16 | emissive surfaces as explicit area lights (Source/VRAD texlight: smooth, no noise/cutoff) vs `0` = hemisphere gather; cell = emitter subdivision size (lower = finer/continuous, slower) |
 | `giskybox` | 0 | sample the loaded skybox as the GI light + drive the sun from it |
 | `lightprobes` / `lightprobegrid` | 0 / 128 | bake + use the ambient-cube model-lighting grid / its spacing |
+| `modelbright` / `modelminbright` | 1 / 0 | multiply / floor the lighting of **all** dynamic models (1/0 = physically correct) |
+| `hudgunbright` / `hudgunminbright` | 1 / 0 | same, applied on top for the **first-person weapon** only (so a dark viewmodel reads in bright scenes) |
 
 The HDR-aware `atmo` sky reuses the stock atmo vars; `atmobright` and `atmosundiskbright` are the main knobs
 for sky/sun brightness (the sun disk is unclamped under `hdr`, so push these higher than in LDR).

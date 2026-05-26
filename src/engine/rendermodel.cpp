@@ -571,10 +571,28 @@ modelbatch &addbatchedmodel(model *m)
     return *b;
 }
 
+// Viewmodel/model lighting brightness knobs (opt-in; 1/0 = stock, physically-correct). A dark-skinned weapon
+// reads near-black against an HDR-bright world even when lit correctly, so games boost the viewmodel; these let
+// you do the same. "bright" multiplies the model's irradiance, "minbright" floors it (lifts shadowed faces).
+// hudgun* apply on top of model* for the first-person weapon only.
+FVARP(modelbright, 0, 1, 16);
+FVARP(modelminbright, 0, 0, 16);
+FVARP(hudgunbright, 0, 1, 16);
+FVARP(hudgunminbright, 0, 0, 16);
+float curmodelbright = 1, curmodelmin = 0;   // read by animmodel model-lighting setup
+
+static void setmodellight(int flags)
+{
+    bool hud = (flags&MDL_HUD)!=0;
+    curmodelbright = modelbright * (hud ? hudgunbright : 1.0f);
+    curmodelmin = max(modelminbright, hud ? hudgunminbright : 0.0f);
+}
+
 void renderbatchedmodel(model *m, batchedmodel &b)
 {
     modelattach *a = NULL;
     if(b.attached>=0) a = &modelattached[b.attached];
+    setmodellight(b.flags);
 
     int anim = b.anim;
     if(shadowmapping)
@@ -967,6 +985,7 @@ void rendermodel(entitylight *light, const char *mdl, int anim, const vec &o, fl
         if(d->query) startquery(d->query);
     }
 
+    setmodellight(flags);
     m->render(anim, basetime, basetime2, o, yaw, pitch, d, a, lightcolor, lightdir, trans);
 
     if(flags&MDL_CULL_QUERY && d->query) endquery(d->query);

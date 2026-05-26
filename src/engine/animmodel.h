@@ -148,9 +148,12 @@ struct animmodel : model
             if(alphatested()) LOCALPARAMF(alphatest, alphatest);
 
             extern int hdr;
+            extern float curmodelbright, curmodelmin;
+            // shading term:  intensity*(intensity*lsx + lsy) + lsz, clamped to [0, lmax]
+            float lsx, lsy, lsz, lmax;
             if(fullbright)
             {
-                LOCALPARAMF(lightscale, 0, 0, 2);
+                lsx = 0; lsy = 0; lsz = 2; lmax = 1;
             }
             else if(hdr)
             {
@@ -160,15 +163,23 @@ struct animmodel : model
                 // and the omnidirectional floor (ambient*lum, e.g. the probe's all-sides fill) stays bright.
                 float lum = max(max(lightcolor.x, lightcolor.y), lightcolor.z),
                       flr = max(ambient, mincolor) * lum;
-                LOCALPARAMF(lightscale, lum - flr, 0.0f, flr);   // i*(i*x + 0) + z  ->  i=1:lum  i=0:flr
+                lsx = lum - flr; lsy = 0; lsz = flr; lmax = 64;   // i=1:lum  i=0:flr
             }
             else
             {
                 float bias = max(mincolor-1.0f, 0.2f), scale = 0.5f*max(0.8f-bias, 0.0f),
                       minshade = scale*max(ambient, mincolor);
-                LOCALPARAMF(lightscale, scale - minshade, scale, minshade + bias);
+                lsx = scale - minshade; lsy = scale; lsz = minshade + bias; lmax = 1;
             }
-            LOCALPARAMF(modellightmax, !fullbright && hdr ? 64.0f : 1.0f);   // lift the LDR [0,1] clamp under HDR
+            if(!fullbright)
+            {
+                // viewmodel/model brightness knobs: scale the whole shading curve, then floor the shade level
+                lsx *= curmodelbright; lsy *= curmodelbright; lsz *= curmodelbright;
+                lsz = max(lsz, curmodelmin);
+                lmax = max(lmax, max(lsx + lsy + lsz, curmodelmin));   // keep headroom so the boost isn't reclamped
+            }
+            LOCALPARAMF(lightscale, lsx, lsy, lsz);
+            LOCALPARAMF(modellightmax, lmax);
             float curglow = glow;
             if(glowpulse > 0)
             {
@@ -924,6 +935,8 @@ struct animmodel : model
                         // the probe grid (sky above, floor bounce below, walls around) -- "light from all sides".
                         GLOBALPARAM(modelworld, matrix3(matrixstack[matrixpos]));
                         vec cube[6]; getprobecube(matrixstack[matrixpos].gettranslation(), cube);
+                        extern float curmodelbright, curmodelmin;
+                        loopi(6) cube[i].mul(curmodelbright).max(curmodelmin);   // viewmodel/model brightness knobs
                         GLOBALPARAM(ambientcube0, cube[0]); GLOBALPARAM(ambientcube1, cube[1]);
                         GLOBALPARAM(ambientcube2, cube[2]); GLOBALPARAM(ambientcube3, cube[3]);
                         GLOBALPARAM(ambientcube4, cube[4]); GLOBALPARAM(ambientcube5, cube[5]);
