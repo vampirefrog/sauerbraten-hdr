@@ -804,6 +804,7 @@ FVARR(giemissive, 0, 1, 64);        // how strongly emissive (glow) textures act
 VARR(giemissivetexel, 0, 0, 1);     // 0 = per-slot average emission (fast, low-noise); 1 = sample the glow texture per-texel at the hit UV (vscale/offset/rotation matter, needs more girays)
 VARR(giemitdirect, 0, 1, 1);        // 1 = explicit area-light sampling of emissive surfaces (Source/VRAD texlight style: smooth, no grazing cutoff); 0 = old hemisphere-gather capture (noisy)
 FVARR(giemitcell, 1, 16, 256);      // emissive-surface subdivision cell size (world units) for the area-light form factor (smaller = more accurate near field, slower)
+FVARR(giskylight, 0, 1, 16);        // scale on sky IBL in the GI gather (1 = full). lower it on maps whose enclosed areas leak bright sky through geometry seams (the bounce off lit surfaces is unaffected)
 
 extern int atmo;
 extern vec atmospherelight(const vec &dir);
@@ -1100,7 +1101,7 @@ static void calcgi(lightmapworker *w, const vec &o, const vec &normal, float tol
         vec ememit;
         if(!giemitdirect && giemitsurfs.length() && nearestgiemit(start, ray, tolerance, dist, ememit))
             out.add(ememit);                                   // (gather mode) ray sees an emissive material surface
-        else if(dist > 1e15f) out.add(skyradiance(ray));       // open sky -> HDR sky IBL (cosine implicit)
+        else if(dist > 1e15f) out.add(vec(skyradiance(ray)).mul(giskylight));   // open sky -> HDR sky IBL (cosine implicit)
         else if(w)
         {
             vec hit = vec(ray).mul(dist).add(start);

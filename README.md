@@ -145,6 +145,7 @@ All new vars default to off/stock. "per-map" vars are bake-time and saved in the
 | `softshadows` / `lightsize` / `sunsoftness` | 0 / 8 / 0.5 | area-light soft shadows (samples / point radius / sun angular deg) |
 | `gi` / `giscale` / `gialbedo` | 0 / 1 / 0.7 | bake sky IBL + multi-bounce GI (needs `hdrlightmaps`) |
 | `gibounces` / `girays` | 2 / 64 | GI bounce count / samples per lumel |
+| `giskylight` | 1 | scale on sky IBL in the GI gather; lower it if an enclosed area leaks bright sky through geometry seams (bounce off lit surfaces is unaffected) |
 | `giemissive` | 1 | emissive glow-map textures as GI area lights (scale; 0 = off) |
 | `giemissivetexel` | 0 | 0 = per-slot average emission; 1 = per-texel glow sampling |
 | `gilava`..`gilava4` / `giwater`..`giwater4` / `giglass`..`giglass4` | 0 | per-variant emission scale for lava/water/glass materials |
