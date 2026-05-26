@@ -849,8 +849,11 @@ static vec gatherdirect(lightmapworker *w, const vec &target, const vec &normal)
     }
     if(sunlight)
     {
+        // sun visibility must pass THROUGH sky-textured faces when skytexturelight is on (same as the primary
+        // sun in generatelumel) -- otherwise a sunlit surface seen via a sky opening bounces no sun.
+        int sunflags = RAY_SHADOW | RAY_POLY | (skytexturelight ? RAY_SKIPSKY | (useskytexture ? RAY_SKYTEX : 0) : 0);
         float angle = sunlightdir.dot(normal);
-        if(angle > 0 && shadowray(w->shadowraycache, target, sunlightdir, 1e16f, RAY_SHADOW | RAY_POLY) > 1e15f)
+        if(angle > 0 && shadowray(w->shadowraycache, target, sunlightdir, 1e16f, sunflags) > 1e15f)
         {
             r += angle*sunlightcolor.x*sunlightscale;
             g += angle*sunlightcolor.y*sunlightscale;
