@@ -1246,9 +1246,9 @@ bool bakeprobes(const vec *positions, vec *out, int count)
     return !probebakecancel;
 }
 
-// Static mapmodels get their own ambient cube sampled from the radiosity solution at the centre of their
-// bounding box, rather than the grid probe at the model origin (which can sit in a hot sunlit floor cell and
-// blow the model out). Baked at calclight time into each mapmodel entity's light.
+// Static model-rendered entities (mapmodels AND game items like ammo/health) get their own ambient cube
+// sampled from the radiosity solution near their centre, rather than the interpolated grid (whose nearest node
+// can sit in a hot sunlit floor cell and blow the model out). Baked at calclight time into the entity's light.
 void bakemapmodelprobes()
 {
     const vector<extentity *> &ents = entities::getents();
@@ -1264,13 +1264,19 @@ void bakemapmodelprobes()
     loopv(ents)
     {
         extentity &e = *ents[i];
-        if(e.type != ET_MAPMODEL) continue;
-        model *m = loadmodel(NULL, e.attr2);
-        if(!m) continue;
-        vec center, radius;
-        m->boundbox(center, radius);                 // bbox centre in model space
-        float yaw = e.attr1*RAD, cy = cosf(yaw), sy = sinf(yaw);
-        vec pos(e.o.x + center.x*cy - center.y*sy, e.o.y + center.x*sy + center.y*cy, e.o.z + center.z);
+        vec pos;
+        if(e.type == ET_MAPMODEL)
+        {
+            model *m = loadmodel(NULL, e.attr2);
+            if(!m) continue;
+            vec center, radius;
+            m->boundbox(center, radius);             // bbox centre in model space
+            float yaw = e.attr1*RAD, cy = cosf(yaw), sy = sinf(yaw);
+            pos = vec(e.o.x + center.x*cy - center.y*sy, e.o.y + center.x*sy + center.y*cy, e.o.z + center.z);
+        }
+        else if(e.type >= ET_GAMESPECIFIC)           // items/pickups: lift off the floor to dodge the hot floor cell
+            pos = vec(e.o.x, e.o.y, e.o.z + 4.0f);
+        else continue;
         gatherprobe(w, pos, e.light.probe);
         e.light.hasprobe = true;
     }
