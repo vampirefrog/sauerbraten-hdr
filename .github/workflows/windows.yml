@@ -23,9 +23,34 @@ jobs:
       - name: Build (Release x64)
         run: msbuild src/vcpp/sauerbraten.sln /m /v:minimal /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
 
-      - name: Upload client binary
+      # Assemble a runnable bundle: the exe + the SDL runtime DLLs (versions matched to the vendored import
+      # libs/headers) + the data/ assets. The SDL2_image zip also supplies zlib1.dll + image-codec DLLs.
+      # NOTE: packages/ (game maps/textures, ~2GB, not in this repo) is NOT included, so the build runs to the
+      # menu but has no maps until you drop a packages/ folder (from upstream Sauerbraten) next to the exe.
+      - name: Assemble runnable bundle
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item bin64/sauerbraten.exe dist/
+          Copy-Item -Recurse data dist/data
+          $deps = @(
+            "https://www.libsdl.org/release/SDL2-2.0.12-win32-x64.zip",
+            "https://www.libsdl.org/projects/SDL_image/release/SDL2_image-2.0.5-win32-x64.zip",
+            "https://www.libsdl.org/projects/SDL_mixer/release/SDL2_mixer-2.0.4-win32-x64.zip"
+          )
+          foreach ($u in $deps) {
+            Invoke-WebRequest -Uri $u -OutFile dep.zip
+            Expand-Archive -Path dep.zip -DestinationPath dep -Force
+            Get-ChildItem dep -Recurse -Filter *.dll | Copy-Item -Destination dist
+            Remove-Item -Recurse -Force dep, dep.zip
+          }
+          "Sauerbraten HDR (Windows x64). Run sauerbraten.exe. For maps/textures, add a packages/ folder from upstream Sauerbraten next to this exe." | Out-File -Encoding ascii dist/README.txt
+          Get-ChildItem dist
+
+      - name: Upload runnable bundle
         uses: actions/upload-artifact@v4
         with:
           name: sauerbraten-hdr-win64
-          path: bin64/*.exe
+          path: dist/**
           if-no-files-found: error
