@@ -140,6 +140,7 @@ All new vars default to off/stock. "per-map" vars are bake-time and saved in the
 | `hdrgamma` | 100 | extra output gamma ×100 (100 = none) |
 | `hdrcontrast` | 1.0 | post-tonemap contrast (>1 darkens shadows/mids) |
 | `hdremissive` / `emissivescale` | 1 / 2.0 | HDR emissive (glow + lava) render boost |
+| `modelglowclamp` | 1.0 | clamp model glow + specular under HDR (1 = LDR-like; raise to let model highlights bloom). Stops shiny/glowy items (e.g. `mdlspec` pickups) blowing out under HDR |
 | `hdrlightmaps` | 0 | bake HDR lightmaps |
 | `rnm` | 0 | bake 3-basis radiosity normal mapping (bumped surfaces) |
 | `softshadows` / `lightsize` / `sunsoftness` | 0 / 8 / 0.5 | area-light soft shadows (samples / point radius / sun angular deg) |

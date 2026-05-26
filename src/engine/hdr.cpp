@@ -47,6 +47,7 @@ FVARP(hdrcontrast, 0.5f, 1.0f, 3.0f);              // post-tonemap contrast (1.0
 
 VARP(hdremissive, 0, 1, 1);                        // scale glow/emissive into HDR so it self-illuminates and blooms
 FVARP(emissivescale, 0.0f, 2.0f, 64.0f);           // global emissive intensity multiplier (only when hdr active)
+FVARP(modelglowclamp, 0.0f, 1.0f, 64.0f);          // clamp model glow under HDR (1 = LDR-like; raise to let model glow bloom)
 
 VAR(debughdr, 0, 0, 1);
 
@@ -112,6 +113,8 @@ bool beginhdr()
 {
     // global emissive boost applied by the glow/bump world shaders (1.0 == stock look)
     GLOBALPARAMF(glowscale, usehdr() && hdremissive ? emissivescale : 1.0f);
+    // model glow is a visibility highlight, not an HDR area light; clamp it under HDR so it doesn't bloom out
+    GLOBALPARAMF(modelglowmax, usehdr() ? modelglowclamp : 1.0e6f);
 
     if(!usehdr()) { scenefbo = 0; return false; }
     setuphdr(screenw, screenh);
