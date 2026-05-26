@@ -1137,7 +1137,8 @@ void renderclient(dynent *d, const char *mdlname, modelattach *attachments, int 
     if(!((anim>>ANIM_SECONDARY)&ANIM_INDEX)) anim |= (ANIM_IDLE|ANIM_LOOP)<<ANIM_SECONDARY;
     int flags = MDL_LIGHT;
     if(d!=player && !(anim&ANIM_RAGDOLL)) flags |= MDL_CULL_VFC | MDL_CULL_OCCLUDED | MDL_CULL_QUERY;
-    if(d->type==ENT_PLAYER) flags |= MDL_FULLBRIGHT;
+    extern int hdr;
+    if(d->type==ENT_PLAYER && !hdr) flags |= MDL_FULLBRIGHT;   // under HDR let players take probe/world lighting
     else flags |= MDL_CULL_DIST;
     if(d->state==CS_LAGGED) fade = min(fade, 0.3f);
     else flags |= MDL_DYNSHADOW;

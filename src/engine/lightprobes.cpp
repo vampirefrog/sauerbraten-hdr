@@ -52,7 +52,8 @@ static bool pointinair(const vec &p)
         return true;             // outside the octree = open void/sky
     ivec ro; int rsize;
     cube &c = lookupcube(ip, 0, ro, rsize);
-    return isempty(c);
+    return !isentirelysolid(c);   // empty OR edged (partial) counts as air -- only skip fully-solid cells, so
+                                  // probes in the air of sloped/detailed (edged) geometry aren't dropped
 }
 
 // relocate a cell-centre probe to open space WITHIN its cell (the grid index is kept, so trilinear interpolation
