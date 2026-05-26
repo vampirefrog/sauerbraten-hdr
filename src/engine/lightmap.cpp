@@ -812,8 +812,9 @@ VARR(giskybox, 0, 0, 1);   // sample the loaded skybox image (incl. its sun) as 
 // HDR radiance of the sky in a world direction (0-255 light scale)
 static vec skyradiance(const vec &dir)
 {
-    if(giskybox && skyboxlightloaded()) return skyboxlight(dir);   // sample the skybox image
-    if(atmo) return atmospherelight(dir);   // else sample the Nishita atmosphere
+    // atmo, when on, renders/overrides the visible sky, so the GI must match it (NOT the now-hidden skybox)
+    if(atmo) return atmospherelight(dir);                          // procedural Nishita atmosphere
+    if(giskybox && skyboxlightloaded()) return skyboxlight(dir);   // else sample the loaded skybox image
     vec sky = hasskylight() ? vec(skylightcolor.x, skylightcolor.y, skylightcolor.z)
                             : vec(ambientcolor.x, ambientcolor.y, ambientcolor.z);
     if(sunlight)   // a bright HDR sun lobe toward the sun direction (sun-from-sky)
@@ -2548,7 +2549,7 @@ void calclight(int *quality)
         buildgiemitsurfs();                // collect emissive lava/water/glass surfaces as GI area lights
         extern void setupatmospherelight();
         if(atmo) setupatmospherelight();   // cache Nishita atmosphere params for sky sampling
-        if(giskybox)                       // skybox as light source: load its pixels + drive the direct sun from its brightest point
+        if(giskybox && !atmo)              // skybox as light source: load its pixels + drive the direct sun from its brightest point (atmo overrides it)
         {
             extern void loadskyboxlight();
             extern bool setsunfromskybox(bool verbose);
