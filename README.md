@@ -172,6 +172,7 @@ for sky/sun brightness (the sun disk is unclamped under `hdr`, so push these hig
 | Command | Purpose |
 |---------|---------|
 | `calclight [quality]` | (existing) bake lightmaps — honours all the bake-time vars above |
+| `calcprobes` | recompute only the light probes (grid + per-mapmodel), reusing the current lightmaps — fast iteration on `lightprobegrid`/probe lighting without a full `calclight` |
 | `hdrinfo` | print HDR pipeline state (tonemap, exposure, loaded HDR/RNM lightmaps, emissive) |
 | `getskyboxsun` | set `sunlightyaw`/`sunlightpitch`/`sunlight` from the skybox's brightest point |
 | `dumplms` | dump the CPU lightmap atlases to PNG (HDR/RNM decoded + tonemapped) |

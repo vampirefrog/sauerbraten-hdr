@@ -2793,6 +2793,45 @@ static void cleanupthreads()
     lightmapping = 0;
 }
 
+// precompute the GI state the bounce/probe gather reads (per-slot albedo+emission, emissive surfaces/emitters,
+// sky source). Single-threaded; safe to call before either the lightmap bake or a standalone probe bake.
+static void setupgibake()
+{
+    if(!gi) return;
+    extern vector<Slot *> slots;
+    extern void computeslotlighting(Slot &slot);
+    loopv(slots) computeslotlighting(*slots[i]);   // per-slot albedo + emission (cache-independent, always reliable)
+    buildgiemitsurfs();                // collect emissive lava/water/glass surfaces (gather mode)
+    buildgiemitters();                 // collect emissive textures + materials as explicit area lights (giemitdirect)
+    extern void setupatmospherelight();
+    if(atmo) setupatmospherelight();   // cache Nishita atmosphere params for sky sampling
+    if(giskybox && !atmo)              // skybox as light source: load its pixels + drive the direct sun from its brightest point (atmo overrides it)
+    {
+        extern void loadskyboxlight();
+        extern bool setsunfromskybox(bool verbose);
+        loadskyboxlight();
+        setsunfromskybox(false);
+    }
+}
+
+// recompute only the light probes (grid + per-mapmodel), reusing the existing lightmaps -- much faster than a
+// full calclight when you're only iterating on probe placement/lighting.
+void calcprobes()
+{
+    extern int lightprobes;
+    if(!lightprobes) { conoutf(CON_ERROR, "lightprobes is 0 -- nothing to compute"); return; }
+    if(lightmaps.empty()) { conoutf(CON_ERROR, "calclight first (probes need the map lit)"); return; }
+    renderbackground("computing light probes... (esc to abort)");
+    calclight_canceled = false;
+    setupgibake();
+    genlightprobes(true);
+    bakemapmodelprobes();
+    initlights();          // refresh model/entity lighting to use the new probes
+    allchanged();
+    conoutf("light probes recomputed (%s)", gi ? "with GI" : "direct only");
+}
+COMMAND(calcprobes, "");
+
 void calclight(int *quality)
 {
     if(!setlightmapquality(*quality))
@@ -2816,23 +2855,7 @@ void calclight(int *quality)
     SDL_TimerID timer = SDL_AddTimer(250, calclighttimer, NULL);
     Uint32 start = SDL_GetTicks();
     calcnormals(lerptjoints > 0);
-    if(gi)   // precompute per-slot albedo (single-threaded) so the GI bounce can read it from workers
-    {
-        extern vector<Slot *> slots;
-        extern void computeslotlighting(Slot &slot);
-        loopv(slots) computeslotlighting(*slots[i]);   // per-slot albedo + emission (cache-independent, always reliable)
-        buildgiemitsurfs();                // collect emissive lava/water/glass surfaces (gather mode)
-        buildgiemitters();                 // collect emissive textures + materials as explicit area lights (giemitdirect)
-        extern void setupatmospherelight();
-        if(atmo) setupatmospherelight();   // cache Nishita atmosphere params for sky sampling
-        if(giskybox && !atmo)              // skybox as light source: load its pixels + drive the direct sun from its brightest point (atmo overrides it)
-        {
-            extern void loadskyboxlight();
-            extern bool setsunfromskybox(bool verbose);
-            loadskyboxlight();
-            setsunfromskybox(false);
-        }
-    }
+    setupgibake();
     show_calclight_progress();
     setupthreads(numthreads);
     generatelightmaps(worldroot, ivec(0, 0, 0), worldsize >> 1);
