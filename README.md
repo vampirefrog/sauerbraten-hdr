@@ -95,6 +95,13 @@ falls back to capturing emission via random hemisphere rays (noisier).
 (`lightprobegrid` spacing) — Valve's irradiance-volume approach — and lights dynamic models (mapmodels,
 players, the HUD weapon) from it instead of per-frame ray casts.
 
+- **Fitted to geometry**: the grid is sized to the bounding box of the open (air) space, not the whole world
+  cube, so the probe budget (and the `lightprobegrid` spacing) isn't wasted on solid filler — a map embedded in
+  a large solid block still gets a fine grid where it matters.
+- **Relocation**: a probe whose cell centre lands in solid is moved to open space *within its cell* (its grid
+  index is kept, so interpolation is unchanged) — so probes straddling a floor/wall, exactly where models stand,
+  still produce useful lighting instead of being discarded. Cells with no air at all are skipped.
+
 - **Full radiosity**: each probe is gathered with the same path-traced solution as the lightmaps, so models
   pick up sky IBL, indirect colour bleed and emissive surfaces — not just direct lights.
 - **Per-pixel ambient cube** (when `hdr` is on): every surfel is lit from the 6 baked directions, so a model

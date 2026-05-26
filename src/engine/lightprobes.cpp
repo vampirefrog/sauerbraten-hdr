@@ -22,9 +22,11 @@ static const vec cubeaxis[6] =
 };
 
 static vector<ambientcube> probes;
-static vector<uchar> probesolid; // 1 = probe sits inside solid geometry (buried/black) -> skip in interpolation
+static vector<uchar> probesolid; // 1 = cell is fully solid (no air to place a probe) -> skip in interpolation
+static vector<vec> probepos;     // actual baked position of each probe (relocated out of geometry; cell index kept)
+static ivec probeorigin(0, 0, 0); // world origin of the grid (grid is fitted to the geometry, not the whole world)
 static ivec probedim(0, 0, 0);   // probe counts per axis
-static int probestep = 0;        // world units between probes (probe centers at (i+0.5)*step)
+static int probestep = 0;        // world units between grid cells (cell index i centered at origin + (i+0.5)*step)
 
 VARR(lightprobes, 0, 0, 1);          // bake (at calclight) and use the ambient-cube grid for model lighting
 VARR(lightprobegrid, 8, 128, 1024);  // target probe spacing in world units (bake time)
@@ -36,28 +38,67 @@ void clearlightprobes()
 {
     probes.shrink(0);
     probesolid.shrink(0);
+    probepos.shrink(0);
+    probeorigin = ivec(0, 0, 0);
     probedim = ivec(0, 0, 0);
     probestep = 0;
 }
 
-// a probe whose cell is solid geometry bakes black and would drag down any model standing on/near that
-// surface; detect those so sampleprobes() can exclude them and renormalise over the valid neighbours.
-static bool probeinsolid(const vec &pos)
+// is this world point in open air (not inside solid geometry)?
+static bool pointinair(const vec &p)
 {
-    ivec ip(int(floor(pos.x)), int(floor(pos.y)), int(floor(pos.z)));
+    ivec ip(int(floor(p.x)), int(floor(p.y)), int(floor(p.z)));
     if(ip.x < 0 || ip.y < 0 || ip.z < 0 || ip.x >= worldsize || ip.y >= worldsize || ip.z >= worldsize)
-        return false;            // outside the octree = open void/sky, keep it
+        return true;             // outside the octree = open void/sky
     ivec ro; int rsize;
     cube &c = lookupcube(ip, 0, ro, rsize);
-    return !isempty(c) && isentirelysolid(c);
+    return isempty(c);
 }
 
-static void markprobesolidity()
+// relocate a cell-centre probe to open space WITHIN its cell (the grid index is kept, so trilinear interpolation
+// is unchanged; only the sampled value comes from nearby air). returns false if the whole cell is solid.
+static bool relocateprobe(const vec &center, float cell, vec &out)
 {
+    if(pointinair(center)) { out = center; return true; }
+    float best = 1e30f; bool found = false;
+    for(int dz = -1; dz <= 1; dz++) for(int dy = -1; dy <= 1; dy++) for(int dx = -1; dx <= 1; dx++)
+    {
+        if(!dx && !dy && !dz) continue;
+        vec p = vec(center).add(vec(dx, dy, dz).mul(cell*0.33f));   // stays within the cell (|offset| < cell/2)
+        if(pointinair(p))
+        {
+            float d = dx*dx + dy*dy + dz*dz;                       // prefer the offset nearest the centre
+            if(d < best) { best = d; out = p; found = true; }
+        }
+    }
+    return found;
+}
+
+// (re)compute each cell's baked position (relocated out of solid) and solid flag from the current grid params.
+// deterministic from the geometry, so it can run at bake time and again on map load to match the saved values.
+static void placeprobes()
+{
+    probepos.setsize(0);
     probesolid.setsize(0);
-    if(probes.empty() || probestep <= 0) return;
+    if(probestep <= 0) return;
     loop(z, probedim.z) loop(y, probedim.y) loop(x, probedim.x)
-        probesolid.add(probeinsolid(vec((x+0.5f)*probestep, (y+0.5f)*probestep, (z+0.5f)*probestep)) ? 1 : 0);
+    {
+        vec center(probeorigin.x + (x+0.5f)*probestep, probeorigin.y + (y+0.5f)*probestep, probeorigin.z + (z+0.5f)*probestep);
+        vec p; bool ok = relocateprobe(center, probestep, p);
+        probepos.add(ok ? p : center);
+        probesolid.add(ok ? 0 : 1);
+    }
+}
+
+// bounding box of open (air) leaf cubes -- the region worth covering with probes (vs the whole world cube)
+static void airbounds(cube *c, const ivec &co, int size, ivec &bbmin, ivec &bbmax)
+{
+    loopi(8)
+    {
+        ivec o(i, co, size);
+        if(c[i].children) airbounds(c[i].children, o, size/2, bbmin, bbmax);
+        else if(isempty(c[i])) { bbmin.min(o); bbmax.max(ivec(o).add(size)); }
+    }
 }
 
 // the per-probe gather (ambient + direct + sun + radiosity) lives in lightmap.cpp next to calcgi; bakeprobes
@@ -70,27 +111,33 @@ void genlightprobes(bool force)
     clearlightprobes();
     if(!lightprobes && !force) return;
 
-    // pick a spacing that keeps the total probe count sane on large maps
-    int step = max(lightprobegrid, 8);
-    while(worldsize/step > 96) step *= 2;
-    probestep = step;
-    probedim = ivec(worldsize/step, worldsize/step, worldsize/step);
-    loopk(3) probedim[k] = max(probedim[k], 1);
+    // fit the grid to the open-space (air) bounding box, not the whole world cube -- so the probe budget goes
+    // where models actually are, and the spacing can be finer for the same count
+    ivec bbmin(worldsize, worldsize, worldsize), bbmax(0, 0, 0);
+    if(worldroot) airbounds(worldroot, ivec(0, 0, 0), worldsize/2, bbmin, bbmax);
+    if(bbmin.x >= bbmax.x) { bbmin = ivec(0, 0, 0); bbmax = ivec(worldsize, worldsize, worldsize); }   // no air -> whole world
+    ivec bbsize = ivec(bbmax).sub(bbmin);
 
+    int step = max(lightprobegrid, 8), maxdim = max(bbsize.x, max(bbsize.y, bbsize.z));
+    while(maxdim/step > 96) step *= 2;                  // cap cells/axis (now measured over the fitted box)
+    probestep = step;
+    probeorigin = bbmin;
+    loopk(3) probedim[k] = max(1, (bbsize[k] + step - 1)/step);
+
+    placeprobes();   // fill probepos[] (relocated out of solid) + probesolid[]
     int total = probedim.x*probedim.y*probedim.z;
     vector<vec> positions;
     positions.growbuf(total);
-    loop(z, probedim.z) loop(y, probedim.y) loop(x, probedim.x)
-        positions.add(vec((x+0.5f)*step, (y+0.5f)*step, (z+0.5f)*step));
+    loopv(probepos) positions.add(probepos[i]);
 
     probes.growbuf(total);
     loopi(total) probes.add();   // ambientcube = 6 contiguous vecs, so the bake fills it as a flat vec[total*6]
     bool ok = bakeprobes(positions.getbuf(), (vec *)probes.getbuf(), total);
     if(!ok) { clearlightprobes(); conoutf("light probe bake aborted"); return; }   // don't keep a half-baked grid
 
-    markprobesolidity();
-    int buried = 0; loopv(probesolid) if(probesolid[i]) buried++;
-    conoutf("generated %d light probes (%dx%dx%d, step %d, %d buried in geometry)", probes.length(), probedim.x, probedim.y, probedim.z, probestep, buried);
+    int solid = 0; loopv(probesolid) if(probesolid[i]) solid++;
+    conoutf("generated %d light probes (%dx%dx%d, step %d, origin %d %d %d, %d in solid)",
+        probes.length(), probedim.x, probedim.y, probedim.z, probestep, probeorigin.x, probeorigin.y, probeorigin.z, solid);
 }
 ICOMMAND(genlightprobes, "", (), genlightprobes(true));
 
@@ -98,8 +145,8 @@ static ambientcube sampleprobes(const vec &pos)
 {
     ambientcube ac;
     if(!haslightprobes()) { loopi(6) ac.faces[i] = vec(ambientcolor.tocolor()); return ac; }
-    // continuous grid coords (probe i centered at (i+0.5)*step)
-    vec g = vec(pos).div(probestep).sub(vec(0.5f, 0.5f, 0.5f));
+    // continuous grid coords (cell index i centered at origin + (i+0.5)*step)
+    vec g = vec(pos).sub(vec(probeorigin)).div(probestep).sub(vec(0.5f, 0.5f, 0.5f));
     ivec b(int(floor(g.x)), int(floor(g.y)), int(floor(g.z)));
     vec f(g.x-b.x, g.y-b.y, g.z-b.z);
     loopi(6) ac.faces[i] = vec(0, 0, 0);
@@ -160,6 +207,7 @@ void savelightprobes(stream *f)
     if(probes.empty()) return;
     f->putlil<int>(probestep);
     f->putlil<int>(probedim.x); f->putlil<int>(probedim.y); f->putlil<int>(probedim.z);
+    f->putlil<int>(probeorigin.x); f->putlil<int>(probeorigin.y); f->putlil<int>(probeorigin.z);
     uchar rgbe[4];
     loopv(probes) loopj(6) { encodergbe(probes[i].faces[j], rgbe); f->write(rgbe, 4); }
 }
@@ -171,10 +219,11 @@ void loadlightprobes(stream *f)
     if(n <= 0) return;
     probestep = f->getlil<int>();
     probedim.x = f->getlil<int>(); probedim.y = f->getlil<int>(); probedim.z = f->getlil<int>();
+    probeorigin.x = f->getlil<int>(); probeorigin.y = f->getlil<int>(); probeorigin.z = f->getlil<int>();
     probes.growbuf(n);
     uchar rgbe[4];
     loopi(n) { ambientcube &ac = probes.add(); loopj(6) { f->read(rgbe, 4); ac.faces[j] = decodergbe(rgbe); } }
-    markprobesolidity();   // recompute (not stored): the world geometry is loaded by now
+    placeprobes();   // recompute positions/solid (not stored): the world geometry is loaded by now
 }
 
 // debug: draw a coloured cross at each non-buried probe (colour = its omnidirectional ambient), so you can see
@@ -185,12 +234,11 @@ void renderlightprobes()
     notextureshader->set();
     gle::defvertex();
     float r = probestep*0.4f;
-    loop(z, probedim.z) loop(y, probedim.y) loop(x, probedim.x)
+    loopv(probes)
     {
-        int idx = (z*probedim.y + y)*probedim.x + x;
-        if(idx < probesolid.length() && probesolid[idx]) continue;   // skip probes buried in geometry
+        if(i < probesolid.length() && probesolid[i]) continue;       // skip cells with no air
         vec c(0, 0, 0);
-        loopi(6) c.add(probes[idx].faces[i]);
+        loopj(6) c.add(probes[i].faces[j]);
         float lum = (c.x + c.y + c.z)*(1.0f/18);   // mean of 6 faces, mean of channels
         // heatmap (blue=dark .. green .. red=bright) at full saturation, so probes are visible on any background
         // and you can read brightness: blue probes are dim, red/yellow probes are bright (over-bright = blown models)
@@ -198,7 +246,7 @@ void renderlightprobes()
                 : lum < 0.5f  ? vec(0, 1, 1-(lum-0.25f)*4)
                 : lum < 0.75f ? vec((lum-0.5f)*4, 1, 0)
                 :               vec(1, max(1-(lum-0.75f)*4, 0.0f), 0);
-        vec p((x+0.5f)*probestep, (y+0.5f)*probestep, (z+0.5f)*probestep);
+        vec p = i < probepos.length() ? probepos[i] : vec(0, 0, 0);   // actual (relocated) position
         gle::color(bvec(uchar(col.x*255), uchar(col.y*255), uchar(col.z*255)));
         gle::begin(GL_LINES);
         gle::attrib(vec(p).sub(vec(r, 0, 0))); gle::attrib(vec(p).add(vec(r, 0, 0)));
