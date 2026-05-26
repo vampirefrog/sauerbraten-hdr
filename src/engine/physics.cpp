@@ -296,6 +296,17 @@ float raycube(const vec &o, const vec &ray, float radius, int mode, int size, ex
     }
 }
 
+// A sky-textured face only emits/admits light if it is actually exposed. A face backed by a solid neighbour
+// cube (sky never visible from the room) must NOT count as sky for lighting, or rays that reach it through a
+// seam leak the bright sky in. Thread-safe: lookupcube with explicit out-params + tsize 0 is read-only.
+static inline bool skyfaceexposed(const cube &c, int side, const ivec &lo, int sz)
+{
+    // exactly the renderer's "is this sky face drawn" test: a sky face backed/occluded by a neighbour cube isn't
+    // visible and so must admit no sky light (else rays reaching it leak the sky). Thread-safe during the bake
+    // (neighbourdepth stays -1 -> read-only worldroot traversal).
+    return visibleface(c, side, lo, sz);
+}
+
 // optimized version for lightmap shadowing... every cycle here counts!!!
 float shadowray(const vec &o, const vec &ray, float radius, int mode, extentity *t)
 {
@@ -314,7 +325,7 @@ float shadowray(const vec &o, const vec &ray, float radius, int mode, extentity 
         {
             if(isentirelysolid(c))
             {
-                if(c.texture[side]==DEFAULT_SKY && mode&RAY_SKIPSKY)
+                if(c.texture[side]==DEFAULT_SKY && mode&RAY_SKIPSKY && skyfaceexposed(c, side, lo, 1<<lshift))
                 {
                     if(mode&RAY_SKYTEX) return radius;
                 }
@@ -327,7 +338,7 @@ float shadowray(const vec &o, const vec &ray, float radius, int mode, extentity 
                 INTERSECTBOX(side = (i<<1) + 1 - lsizemask[i], goto nextcube);
                 if(exitdist >= 0)
                 {
-                    if(c.texture[side]==DEFAULT_SKY && mode&RAY_SKIPSKY)
+                    if(c.texture[side]==DEFAULT_SKY && mode&RAY_SKIPSKY && skyfaceexposed(c, side, lo, 1<<lshift))
                     {
                         if(mode&RAY_SKYTEX) return radius;
                     }
@@ -386,7 +397,7 @@ float shadowray(ShadowRayCache *cache, const vec &o, const vec &ray, float radiu
         {
             if(isentirelysolid(c))
             {
-                if(c.texture[side]==DEFAULT_SKY && mode&RAY_SKIPSKY)
+                if(c.texture[side]==DEFAULT_SKY && mode&RAY_SKIPSKY && skyfaceexposed(c, side, lo, 1<<lshift))
                 {
                     if(mode&RAY_SKYTEX) return radius;
                 }
@@ -400,7 +411,7 @@ float shadowray(ShadowRayCache *cache, const vec &o, const vec &ray, float radiu
                 INTERSECTBOX(side = (i<<1) + 1 - lsizemask[i], goto nextcube);
                 if(exitdist >= 0)
                 {
-                    if(c.texture[side]==DEFAULT_SKY && mode&RAY_SKIPSKY)
+                    if(c.texture[side]==DEFAULT_SKY && mode&RAY_SKIPSKY && skyfaceexposed(c, side, lo, 1<<lshift))
                     {
                         if(mode&RAY_SKYTEX) return radius;
                     }
