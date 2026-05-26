@@ -22,6 +22,7 @@ static const vec cubeaxis[6] =
 };
 
 static vector<ambientcube> probes;
+static vector<uchar> probesolid; // 1 = probe sits inside solid geometry (buried/black) -> skip in interpolation
 static ivec probedim(0, 0, 0);   // probe counts per axis
 static int probestep = 0;        // world units between probes (probe centers at (i+0.5)*step)
 
@@ -34,14 +35,40 @@ bool haslightprobes() { return lightprobes && probes.length() && probestep > 0; 
 void clearlightprobes()
 {
     probes.shrink(0);
+    probesolid.shrink(0);
     probedim = ivec(0, 0, 0);
     probestep = 0;
 }
 
+// a probe whose cell is solid geometry bakes black and would drag down any model standing on/near that
+// surface; detect those so sampleprobes() can exclude them and renormalise over the valid neighbours.
+static bool probeinsolid(const vec &pos)
+{
+    ivec ip(int(floor(pos.x)), int(floor(pos.y)), int(floor(pos.z)));
+    if(ip.x < 0 || ip.y < 0 || ip.z < 0 || ip.x >= worldsize || ip.y >= worldsize || ip.z >= worldsize)
+        return false;            // outside the octree = open void/sky, keep it
+    ivec ro; int rsize;
+    cube &c = lookupcube(ip, 0, ro, rsize);
+    return !isempty(c) && isentirelysolid(c);
+}
+
+static void markprobesolidity()
+{
+    probesolid.setsize(0);
+    if(probes.empty() || probestep <= 0) return;
+    loop(z, probedim.z) loop(y, probedim.y) loop(x, probedim.x)
+        probesolid.add(probeinsolid(vec((x+0.5f)*probestep, (y+0.5f)*probestep, (z+0.5f)*probestep)) ? 1 : 0);
+}
+
 // gather an ambient cube at a world position from the static lights, sun and skylight
+extern int gi;                                  // GI bake toggle (lightmap.cpp)
+extern void gatherproberadiosity(const vec &pos, vec *faces);
+
 static void computeprobe(const vec &pos, ambientcube &ac)
 {
-    vec amb = vec(skylightcolor.tocolor().max(ambientcolor.tocolor()));   // flat ambient floor
+    // when GI is baked the sky comes from the radiosity gather below, so drop the flat skylight floor to
+    // plain ambient (avoid double-counting), matching how the lightmap bake handles it.
+    vec amb = gi ? vec(ambientcolor.tocolor()) : vec(skylightcolor.tocolor().max(ambientcolor.tocolor()));
     loopi(6) ac.faces[i] = amb;
 
     const vector<extentity *> &ents = entities::getents();
@@ -78,6 +105,12 @@ static void computeprobe(const vec &pos, ambientcube &ac)
         vec suncol = vec(sunlightcolor.x, sunlightcolor.y, sunlightcolor.z).mul(sunlightscale/255.0f);
         loopj(6) { float d = cubeaxis[j].dot(sunlightdir); if(d > 0) ac.faces[j].add(vec(suncol).mul(d)); }
     }
+    // + full radiosity (sky IBL, indirect bounce, emissive surfaces) when GI is baked -- so models pick up
+    // the same indirect lighting the world lightmaps have. Radiances here are on the 0-255 scale; the direct
+    // terms above are 0-1, so normalise the radiosity into the same range.
+    vec gifaces[6];
+    gatherproberadiosity(pos, gifaces);
+    loopi(6) ac.faces[i].add(vec(gifaces[i]).mul(1.0f/255));
 }
 
 void genlightprobes(bool force)
@@ -99,7 +132,9 @@ void genlightprobes(bool force)
         vec pos((x+0.5f)*step, (y+0.5f)*step, (z+0.5f)*step);
         computeprobe(pos, probes.add());
     }
-    conoutf("generated %d light probes (%dx%dx%d, step %d)", probes.length(), probedim.x, probedim.y, probedim.z, probestep);
+    markprobesolidity();
+    int buried = 0; loopv(probesolid) if(probesolid[i]) buried++;
+    conoutf("generated %d light probes (%dx%dx%d, step %d, %d buried in geometry)", probes.length(), probedim.x, probedim.y, probedim.z, probestep, buried);
 }
 ICOMMAND(genlightprobes, "", (), genlightprobes(true));
 
@@ -112,13 +147,20 @@ static ambientcube sampleprobes(const vec &pos)
     ivec b(int(floor(g.x)), int(floor(g.y)), int(floor(g.z)));
     vec f(g.x-b.x, g.y-b.y, g.z-b.z);
     loopi(6) ac.faces[i] = vec(0, 0, 0);
+    float wsum = 0;
     loop(dz, 2) loop(dy, 2) loop(dx, 2)
     {
         ivec c(clamp(b.x+dx, 0, probedim.x-1), clamp(b.y+dy, 0, probedim.y-1), clamp(b.z+dz, 0, probedim.z-1));
+        int idx = (c.z*probedim.y + c.y)*probedim.x + c.x;
+        if(idx < probesolid.length() && probesolid[idx]) continue;   // skip probes buried in geometry
         float w = (dx ? f.x : 1-f.x) * (dy ? f.y : 1-f.y) * (dz ? f.z : 1-f.z);
-        const ambientcube &p = probes[(c.z*probedim.y + c.y)*probedim.x + c.x];
-        loopi(6) ac.faces[i].add(vec(p.faces[i]).mul(w));
+        loopi(6) ac.faces[i].add(vec(probes[idx].faces[i]).mul(w));
+        wsum += w;
     }
+    // renormalise over the valid neighbours so buried/black probes don't darken the result; if every
+    // surrounding probe is buried, fall back to flat ambient rather than black.
+    if(wsum > 1e-4f) loopi(6) ac.faces[i].mul(1.0f/wsum);
+    else loopi(6) ac.faces[i] = vec(ambientcolor.tocolor());
     return ac;
 }
 
@@ -126,16 +168,33 @@ static ambientcube sampleprobes(const vec &pos)
 void lightprobesreaching(const vec &target, vec &color, vec &dir)
 {
     ambientcube ac = sampleprobes(target);
-    color = vec(0, 0, 0);
+    // omnidirectional fill (so back-facing parts never go pure black)
+    vec amb(0, 0, 0);
     dir = vec(0, 0, 0);
     loopi(6)
     {
-        color.add(ac.faces[i]);
+        amb.add(ac.faces[i]);
         dir.add(vec(cubeaxis[i]).mul(ac.faces[i].x + ac.faces[i].y + ac.faces[i].z));
     }
-    color.mul(1.0f/6);                       // spherical-average irradiance
-    loopk(3) color[k] = min(color[k], 1.5f);
+    amb.mul(1.0f/6);
     if(dir.iszero()) dir = vec(0, 0, 1); else dir.normalize();
+    // radiance arriving from the dominant direction — matches stock lightreaching's
+    // "full light intensity" scale (a single sunlit face must read ~suncol, not suncol/6).
+    color = vec(0, 0, 0);
+    loopi(6)
+    {
+        float d = vec(cubeaxis[i]).dot(dir);
+        if(d > 0) color.add(vec(ac.faces[i]).mul(d));
+    }
+    loopk(3) color[k] = min(max(color[k], amb[k]), 1.5f);
+}
+
+// model lighting: the 6 ambient-cube faces at a world position (for per-normal Valve ambient-cube shading).
+// faces order matches cubeaxis: +X,-X,+Y,-Y,+Z,-Z. Radiances are on the same 0-1.5 scale as lightreaching.
+void getprobecube(const vec &pos, vec *faces)
+{
+    ambientcube ac = sampleprobes(pos);
+    loopi(6) faces[i] = ac.faces[i];
 }
 
 // ----- serialization (.ogz section, MAPVERSION >= 34) -----
@@ -159,6 +218,7 @@ void loadlightprobes(stream *f)
     probes.growbuf(n);
     uchar rgbe[4];
     loopi(n) { ambientcube &ac = probes.add(); loopj(6) { f->read(rgbe, 4); ac.faces[j] = decodergbe(rgbe); } }
+    markprobesolidity();   // recompute (not stored): the world geometry is loaded by now
 }
 
 ICOMMAND(lightprobeinfo, "", (),
@@ -169,5 +229,8 @@ ICOMMAND(lightprobeinfo, "", (),
     {
         ambientcube ac = sampleprobes(camera1->o);
         loopi(6) conoutf("  face %d: %.2f %.2f %.2f", i, ac.faces[i].x, ac.faces[i].y, ac.faces[i].z);
+        vec col(0,0,0); vec dir(0,0,0);
+        lightprobesreaching(camera1->o, col, dir);
+        conoutf("  reaching: color %.2f %.2f %.2f  dir %.2f %.2f %.2f", col.x, col.y, col.z, dir.x, dir.y, dir.z);
     }
 });

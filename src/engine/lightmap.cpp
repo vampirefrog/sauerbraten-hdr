@@ -1128,6 +1128,24 @@ static void calcgi(lightmapworker *w, const vec &o, const vec &normal, float tol
     if(depth <= 1) out.mul(giscale);
 }
 
+// Full-radiosity light-probe gather: fill the 6 ambient-cube faces with the indirect lighting (sky IBL +
+// bounce + emissive) a surface at `pos` facing each +/- axis would receive -- i.e. calcgi per axis. Lets the
+// baked probe grid light models with the same GI the world lightmaps have (Valve sampled ambient cubes from
+// the radiosity solution). Single-threaded (called from genlightprobes), so one reusable worker suffices.
+static const vec probeaxis[6] = { vec(1, 0, 0), vec(-1, 0, 0), vec(0, 1, 0), vec(0, -1, 0), vec(0, 0, 1), vec(0, 0, -1) };
+static lightmapworker *probeworker = NULL;
+void gatherproberadiosity(const vec &pos, vec *faces)
+{
+    loopi(6) faces[i] = vec(0, 0, 0);
+    if(!gi) return;
+    if(!probeworker) probeworker = new lightmapworker;
+    resetshadowraycache(probeworker->shadowraycache);
+    probeworker->lights.setsize(0);                            // all map lights, so the bounce sees them
+    const vector<extentity *> &ents = entities::getents();
+    loopv(ents) if(ents[i]->type == ET_LIGHT) probeworker->lights.add(ents[i]);
+    loopi(6) calcgi(probeworker, pos, probeaxis[i], 0.5f, faces[i], 1);
+}
+
 VARR(blurlms, 0, 0, 2);
 VARR(blurskylight, 0, 0, 2);
 

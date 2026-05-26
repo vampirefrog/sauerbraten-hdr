@@ -90,10 +90,22 @@ falls back to capturing emission via random hemisphere rays (noisier).
 - **Materials**: lava, water and glass volumes emit their material colour into GI, set per variant with
   `gilava`/`gilava2`/`gilava3`/`gilava4` (and `giwater…`, `giglass…`).
 
-### Light-probe grid
+### Light-probe grid (model lighting)
 `lightprobes 1` bakes a grid of **ambient cubes** (6 directional radiance samples) through the level
-(`lightprobegrid` spacing) and lights dynamic mapmodels by trilinearly interpolating the surrounding probes
-— Valve's irradiance-volume approach — instead of per-frame ray casts.
+(`lightprobegrid` spacing) — Valve's irradiance-volume approach — and lights dynamic models (mapmodels,
+players, the HUD weapon) from it instead of per-frame ray casts.
+
+- **Full radiosity**: each probe is gathered with the same path-traced solution as the lightmaps, so models
+  pick up sky IBL, indirect colour bleed and emissive surfaces — not just direct lights.
+- **Per-pixel ambient cube** (when `hdr` is on): every surfel is lit from the 6 baked directions, so a model
+  gets the sky from above, the floor bounce from below and walls from the sides — true "light from all
+  sides", in HDR (no LDR clamp), instead of a single light + flat fill.
+- **Buried-probe handling**: probes that fall inside solid geometry bake black; they're detected and excluded
+  from the interpolation (weights renormalised over the valid neighbours), so a model standing on the floor
+  isn't dragged toward black by the probes under the surface. A finer `lightprobegrid` keeps a valid probe
+  closer to each surface. The bake prints how many probes were buried.
+
+`lightprobes 0` (or a map with no baked grid) falls back to the stock runtime model-lighting path.
 
 ### Sky as a light source
 - `atmo 1` makes the procedural Nishita atmosphere drive the GI bake (blue sky fill + warm sun).

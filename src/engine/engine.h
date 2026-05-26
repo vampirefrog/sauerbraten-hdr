@@ -383,6 +383,7 @@ extern bool haslightprobes();
 extern void clearlightprobes();
 extern void genlightprobes(bool force = false);
 extern void lightprobesreaching(const vec &target, vec &color, vec &dir);
+extern void getprobecube(const vec &pos, vec *faces);
 extern void savelightprobes(stream *f);
 extern void loadlightprobes(stream *f);
 

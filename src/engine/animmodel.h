@@ -133,6 +133,10 @@ struct animmodel : model
             {
                 gle::colorf(fullbright/2, fullbright/2, fullbright/2, transparent);
             }
+            else if(useambientcube)
+            {
+                gle::colorf(1, 1, 1, transparent);   // ambient cube supplies the (HDR, coloured) lighting in-shader
+            }
             else
             {
                 gle::color(vec(lightcolor).max(mincolor), transparent);
@@ -143,9 +147,20 @@ struct animmodel : model
 
             if(alphatested()) LOCALPARAMF(alphatest, alphatest);
 
+            extern int hdr;
             if(fullbright)
             {
                 LOCALPARAMF(lightscale, 0, 0, 2);
+            }
+            else if(hdr)
+            {
+                // HDR model lighting: the LDR curve caps the lit side at ~0.8 and floors the shade at a flat
+                // ~0.29, so models read near-black against an HDR-bright world. Instead drive the lighting from
+                // the (still-unclamped) HDR lightcolor luminance -- the lit side reaches the true light level
+                // and the omnidirectional floor (ambient*lum, e.g. the probe's all-sides fill) stays bright.
+                float lum = max(max(lightcolor.x, lightcolor.y), lightcolor.z),
+                      flr = max(ambient, mincolor) * lum;
+                LOCALPARAMF(lightscale, lum - flr, 0.0f, flr);   // i*(i*x + 0) + z  ->  i=1:lum  i=0:flr
             }
             else
             {
@@ -153,6 +168,7 @@ struct animmodel : model
                       minshade = scale*max(ambient, mincolor);
                 LOCALPARAMF(lightscale, scale - minshade, scale, minshade + bias);
             }
+            LOCALPARAMF(modellightmax, !fullbright && hdr ? 64.0f : 1.0f);   // lift the LDR [0,1] clamp under HDR
             float curglow = glow;
             if(glowpulse > 0)
             {
@@ -900,7 +916,21 @@ struct animmodel : model
 
                 if(!(anim&ANIM_NOSKIN))
                 {
-                    if(envmapped()) GLOBALPARAM(modelworld, matrix3(matrixstack[matrixpos]));
+                    extern int hdr;
+                    useambientcube = false;
+                    if(hdr && haslightprobes())
+                    {
+                        // Valve ambient cube: light each normal from the 6 directional radiances baked into
+                        // the probe grid (sky above, floor bounce below, walls around) -- "light from all sides".
+                        GLOBALPARAM(modelworld, matrix3(matrixstack[matrixpos]));
+                        vec cube[6]; getprobecube(matrixstack[matrixpos].gettranslation(), cube);
+                        GLOBALPARAM(ambientcube0, cube[0]); GLOBALPARAM(ambientcube1, cube[1]);
+                        GLOBALPARAM(ambientcube2, cube[2]); GLOBALPARAM(ambientcube3, cube[3]);
+                        GLOBALPARAM(ambientcube4, cube[4]); GLOBALPARAM(ambientcube5, cube[5]);
+                        useambientcube = true;
+                    }
+                    else if(envmapped()) GLOBALPARAM(modelworld, matrix3(matrixstack[matrixpos]));
+                    GLOBALPARAMF(ambcubeon, useambientcube ? 1.0f : 0.0f);
 
                     vec odir, ocampos;
                     matrixstack[matrixpos].transposedtransformnormal(lightdir, odir);
@@ -1336,6 +1366,7 @@ struct animmodel : model
 
     static bool enabletc, enablealphablend, enablecullface, enablenormals, enabletangents, enablebones, enabledepthoffset;
     static vec lightdir, lightcolor;
+    static bool useambientcube;   // HDR per-normal ambient-cube model lighting active for this draw
     static float transparent, lastalphatest;
     static GLuint lastvbuf, lasttcbuf, lastnbuf, lastxbuf, lastbbuf, lastebuf, lastenvmaptex, closestenvmaptex;
     static Texture *lasttex, *lastmasks, *lastnormalmap;
@@ -1406,6 +1437,7 @@ bool animmodel::enabletc = false, animmodel::enablealphablend = false,
      animmodel::enablecullface = true,
      animmodel::enablenormals = false, animmodel::enabletangents = false, animmodel::enablebones = false, animmodel::enabledepthoffset = false;
 vec animmodel::lightdir(0, 0, 1), animmodel::lightcolor(1, 1, 1);
+bool animmodel::useambientcube = false;
 float animmodel::transparent = 1, animmodel::lastalphatest = -1;
 GLuint animmodel::lastvbuf = 0, animmodel::lasttcbuf = 0, animmodel::lastnbuf = 0, animmodel::lastxbuf = 0, animmodel::lastbbuf = 0,
        animmodel::lastebuf = 0, animmodel::lastenvmaptex = 0, animmodel::closestenvmaptex = 0;
