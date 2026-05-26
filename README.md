@@ -5,9 +5,9 @@ pipeline, HDR + radiosity-normal-mapped lightmaps, baked global illumination, em
 materials, an ambient-cube light-probe grid for models, and HDR textures/skyboxes — all gated behind
 variables so the stock LDR renderer is unchanged by default.
 
-The lighting model follows Mitchell, *"Shading in Valve's Source Engine"* (SIGGRAPH 2006): an fp16 scene
-buffer with tonemapping and eye-adaptation, 3-basis radiosity normal mapping, ambient-cube irradiance
-volumes, and emissive surfaces as light sources.
+The lighting model follows Mitchell, [*"Shading in Valve's Source Engine"*](https://advances.realtimerendering.com/s2006/Mitchell-ShadingInValvesSourceEngine.pdf)
+(SIGGRAPH 2006): an fp16 scene buffer with tonemapping and eye-adaptation, 3-basis radiosity normal
+mapping, ambient-cube irradiance volumes, and emissive surfaces as light sources.
 
 ## Attribution & license
 
@@ -160,3 +160,10 @@ folder for maps.
 - Map version was bumped (34); the new engine loads older maps unchanged, and HDR/RNM data rides new
   lightmap type bits plus an optional light-probe section that old maps simply don't have.
 - See `HDR_TESTING.md` for a hands-on testing guide with example recipes for each feature.
+
+## References
+
+- Jason Mitchell, Gary McTaggart, Chris Green — *"Shading in Valve's Source Engine"*, SIGGRAPH 2006
+  Advanced Real-Time Rendering course:
+  https://advances.realtimerendering.com/s2006/Mitchell-ShadingInValvesSourceEngine.pdf
+- Cube 2: Sauerbraten — http://sauerbraten.org/
