@@ -60,58 +60,10 @@ static void markprobesolidity()
         probesolid.add(probeinsolid(vec((x+0.5f)*probestep, (y+0.5f)*probestep, (z+0.5f)*probestep)) ? 1 : 0);
 }
 
-// gather an ambient cube at a world position from the static lights, sun and skylight
+// the per-probe gather (ambient + direct + sun + radiosity) lives in lightmap.cpp next to calcgi; bakeprobes
+// runs it across worker threads (ESC cancels, returns false), writing 6 faces per probe into a flat vec array.
 extern int gi;                                  // GI bake toggle (lightmap.cpp)
-extern void gatherproberadiosity(const vec &pos, vec *faces);
-
-static void computeprobe(const vec &pos, ambientcube &ac)
-{
-    // when GI is baked the sky comes from the radiosity gather below, so drop the flat skylight floor to
-    // plain ambient (avoid double-counting), matching how the lightmap bake handles it.
-    vec amb = gi ? vec(ambientcolor.tocolor()) : vec(skylightcolor.tocolor().max(ambientcolor.tocolor()));
-    loopi(6) ac.faces[i] = amb;
-
-    const vector<extentity *> &ents = entities::getents();
-    const vector<int> &lights = checklightcache(int(pos.x), int(pos.y));
-    loopv(lights)
-    {
-        extentity &e = *ents[lights[i]];
-        if(e.type != ET_LIGHT) continue;
-        vec ray(pos);
-        ray.sub(e.o);
-        float mag = ray.magnitude();
-        if(e.attr1 && mag >= float(e.attr1)) continue;
-        vec tolight(0, 0, 1);
-        if(mag >= 1e-4f)
-        {
-            ray.div(mag);
-            if(shadowray(e.o, ray, mag, RAY_SHADOW | RAY_POLY) < mag) continue;
-            tolight = vec(ray).neg();
-        }
-        float intensity = e.attr1 ? 1 - mag/float(e.attr1) : 1;
-        if(e.attached && e.attached->type==ET_SPOTLIGHT)
-        {
-            vec spot = vec(e.attached->o).sub(e.o).normalize();
-            float maxatten = cosf(clamp(int(e.attached->attr1), 1, 89)*RAD),
-                  spotatten = (ray.dot(spot) - maxatten) / (1 - maxatten);
-            if(spotatten <= 0) continue;
-            intensity *= spotatten;
-        }
-        vec lightcol = vec(e.attr2, e.attr3, e.attr4).mul(intensity/255.0f);
-        loopj(6) { float d = cubeaxis[j].dot(tolight); if(d > 0) ac.faces[j].add(vec(lightcol).mul(d)); }
-    }
-    if(sunlight && shadowray(pos, sunlightdir, 1e16f, RAY_SHADOW | RAY_POLY) > 1e15f)
-    {
-        vec suncol = vec(sunlightcolor.x, sunlightcolor.y, sunlightcolor.z).mul(sunlightscale/255.0f);
-        loopj(6) { float d = cubeaxis[j].dot(sunlightdir); if(d > 0) ac.faces[j].add(vec(suncol).mul(d)); }
-    }
-    // + full radiosity (sky IBL, indirect bounce, emissive surfaces) when GI is baked -- so models pick up
-    // the same indirect lighting the world lightmaps have. Radiances here are on the 0-255 scale; the direct
-    // terms above are 0-1, so normalise the radiosity into the same range.
-    vec gifaces[6];
-    gatherproberadiosity(pos, gifaces);
-    loopi(6) ac.faces[i].add(vec(gifaces[i]).mul(1.0f/255));
-}
+extern bool bakeprobes(const vec *positions, vec *out, int count);
 
 void genlightprobes(bool force)
 {
@@ -126,16 +78,16 @@ void genlightprobes(bool force)
     loopk(3) probedim[k] = max(probedim[k], 1);
 
     int total = probedim.x*probedim.y*probedim.z;
+    vector<vec> positions;
+    positions.growbuf(total);
+    loop(z, probedim.z) loop(y, probedim.y) loop(x, probedim.x)
+        positions.add(vec((x+0.5f)*step, (y+0.5f)*step, (z+0.5f)*step));
+
     probes.growbuf(total);
-    loop(z, probedim.z)
-    {
-        renderprogress(float(z)/probedim.z, "generating light probes...");   // each probe does a full GI gather, so show progress
-        loop(y, probedim.y) loop(x, probedim.x)
-        {
-            vec pos((x+0.5f)*step, (y+0.5f)*step, (z+0.5f)*step);
-            computeprobe(pos, probes.add());
-        }
-    }
+    loopi(total) probes.add();   // ambientcube = 6 contiguous vecs, so the bake fills it as a flat vec[total*6]
+    bool ok = bakeprobes(positions.getbuf(), (vec *)probes.getbuf(), total);
+    if(!ok) { clearlightprobes(); conoutf("light probe bake aborted"); return; }   // don't keep a half-baked grid
+
     markprobesolidity();
     int buried = 0; loopv(probesolid) if(probesolid[i]) buried++;
     conoutf("generated %d light probes (%dx%dx%d, step %d, %d buried in geometry)", probes.length(), probedim.x, probedim.y, probedim.z, probestep, buried);

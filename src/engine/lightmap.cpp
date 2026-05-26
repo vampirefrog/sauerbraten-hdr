@@ -1131,22 +1131,118 @@ static void calcgi(lightmapworker *w, const vec &o, const vec &normal, float tol
     if(depth <= 1) out.mul(giscale);
 }
 
-// Full-radiosity light-probe gather: fill the 6 ambient-cube faces with the indirect lighting (sky IBL +
-// bounce + emissive) a surface at `pos` facing each +/- axis would receive -- i.e. calcgi per axis. Lets the
-// baked probe grid light models with the same GI the world lightmaps have (Valve sampled ambient cubes from
-// the radiosity solution). Single-threaded (called from genlightprobes), so one reusable worker suffices.
+// Full ambient-cube gather at `pos`: fill the 6 faces (+X,-X,+Y,-Y,+Z,-Z) with the lighting a surface facing
+// each axis would receive -- ambient floor + direct lights + sun + full radiosity (sky IBL + bounce + emissive,
+// via calcgi). Thread-safe: uses only the passed worker's shadow-ray cache and light list. Used to bake the
+// probe grid and to light static mapmodels (Valve sampled ambient cubes from the radiosity solution).
 static const vec probeaxis[6] = { vec(1, 0, 0), vec(-1, 0, 0), vec(0, 1, 0), vec(0, -1, 0), vec(0, 0, 1), vec(0, 0, -1) };
-static lightmapworker *probeworker = NULL;
-void gatherproberadiosity(const vec &pos, vec *faces)
+
+void gatherprobe(lightmapworker *w, const vec &pos, vec *faces)
 {
-    loopi(6) faces[i] = vec(0, 0, 0);
-    if(!gi) return;
-    if(!probeworker) probeworker = new lightmapworker;
-    resetshadowraycache(probeworker->shadowraycache);
-    probeworker->lights.setsize(0);                            // all map lights, so the bounce sees them
+    // ambient floor (when GI is baked the sky comes from the radiosity gather below, so don't double-count it)
+    vec amb = gi ? vec(ambientcolor.tocolor()) : vec(skylightcolor.tocolor().max(ambientcolor.tocolor()));
+    loopi(6) faces[i] = amb;
+
+    loopv(w->lights)
+    {
+        const extentity &e = *w->lights[i];
+        vec ray = vec(pos).sub(e.o);
+        float mag = ray.magnitude();
+        if(e.attr1 && mag >= float(e.attr1)) continue;
+        vec tolight(0, 0, 1);
+        if(mag >= 1e-4f)
+        {
+            ray.div(mag);
+            if(shadowray(w->shadowraycache, e.o, ray, mag, RAY_SHADOW | RAY_POLY) < mag) continue;
+            tolight = vec(ray).neg();
+        }
+        float intensity = e.attr1 ? 1 - mag/float(e.attr1) : 1;
+        if(e.attached && e.attached->type==ET_SPOTLIGHT)
+        {
+            vec spot = vec(e.attached->o).sub(e.o).normalize();
+            float maxatten = cosf(clamp(int(e.attached->attr1), 1, 89)*RAD),
+                  spotatten = (ray.dot(spot) - maxatten) / (1 - maxatten);
+            if(spotatten <= 0) continue;
+            intensity *= spotatten;
+        }
+        vec lightcol = vec(e.attr2, e.attr3, e.attr4).mul(intensity/255.0f);
+        loopj(6) { float d = probeaxis[j].dot(tolight); if(d > 0) faces[j].add(vec(lightcol).mul(d)); }
+    }
+    if(sunlight)
+    {
+        // skip sky faces when skytexturelight is on, same as the lightmap sun (else a probe by a sky opening misses it)
+        int sunflags = RAY_SHADOW | RAY_POLY | (skytexturelight ? RAY_SKIPSKY | (useskytexture ? RAY_SKYTEX : 0) : 0);
+        if(shadowray(w->shadowraycache, pos, sunlightdir, 1e16f, sunflags) > 1e15f)
+        {
+            vec suncol = vec(sunlightcolor.x, sunlightcolor.y, sunlightcolor.z).mul(sunlightscale/255.0f);
+            loopj(6) { float d = probeaxis[j].dot(sunlightdir); if(d > 0) faces[j].add(vec(suncol).mul(d)); }
+        }
+    }
+    if(gi) loopi(6)
+    {
+        vec g(0, 0, 0);
+        calcgi(w, pos, probeaxis[i], 0.5f, g, 1);
+        faces[i].add(vec(g).mul(1.0f/255));    // radiosity is on the 0-255 scale; direct terms above are 0-1
+    }
+}
+
+// --- threaded probe-grid bake (each worker computes a slice; ESC cancels; main thread shows progress) ---
+static SDL_mutex *probebakelock = NULL;
+static const vec *probebakepos = NULL;
+static vec *probebakeout = NULL;
+static volatile int probebakecount = 0, probebakenext = 0, probebakedone = 0;
+static volatile bool probebakecancel = false;
+
+static int probebakeworker(void *data)
+{
+    lightmapworker *w = (lightmapworker *)data;
+    for(;;)
+    {
+        SDL_LockMutex(probebakelock);
+        int i = (!probebakecancel && probebakenext < probebakecount) ? probebakenext++ : -1;
+        SDL_UnlockMutex(probebakelock);
+        if(i < 0) break;
+        gatherprobe(w, probebakepos[i], &probebakeout[i*6]);
+        SDL_LockMutex(probebakelock); probebakedone++; SDL_UnlockMutex(probebakelock);
+    }
+    return 0;
+}
+
+// fill out[count*6] vecs from positions[count], multithreaded. returns false if the user pressed ESC.
+extern int lightthreads;   // VARP defined later in this file
+bool bakeprobes(const vec *positions, vec *out, int count)
+{
+    int nthreads = lightthreads > 0 ? lightthreads : max(numcpus + lightthreads, 1);
+    nthreads = clamp(nthreads, 1, 16);
+    probebakepos = positions; probebakeout = out; probebakecount = count;
+    probebakenext = probebakedone = 0; probebakecancel = false;
+
+    while(lightmapworkers.length() < nthreads) lightmapworkers.add(new lightmapworker);
     const vector<extentity *> &ents = entities::getents();
-    loopv(ents) if(ents[i]->type == ET_LIGHT) probeworker->lights.add(ents[i]);
-    loopi(6) calcgi(probeworker, pos, probeaxis[i], 0.5f, faces[i], 1);
+    loopi(nthreads)
+    {
+        lightmapworker *w = lightmapworkers[i];
+        resetshadowraycache(w->shadowraycache);
+        w->lights.setsize(0);
+        loopvj(ents) if(ents[j]->type == ET_LIGHT) w->lights.add(ents[j]);   // all map lights, so bounce sees them
+    }
+    probebakelock = SDL_CreateMutex();
+    vector<SDL_Thread *> threads;
+    loopi(nthreads) threads.add(SDL_CreateThread(probebakeworker, "probe bake", lightmapworkers[i]));
+
+    int done = 0;
+    while(done < count)
+    {
+        if(interceptkey(SDLK_ESCAPE)) { SDL_LockMutex(probebakelock); probebakecancel = true; SDL_UnlockMutex(probebakelock); }
+        SDL_LockMutex(probebakelock); done = probebakedone; SDL_UnlockMutex(probebakelock);
+        defformatstring(text, "generating light probes... %d%% (esc to skip)", count ? int(100.0f*done/count) : 100);
+        renderprogress(count ? float(done)/count : 1, text);
+        if(probebakecancel) break;
+        SDL_Delay(30);
+    }
+    loopv(threads) SDL_WaitThread(threads[i], NULL);
+    SDL_DestroyMutex(probebakelock); probebakelock = NULL;
+    return !probebakecancel;
 }
 
 VARR(blurlms, 0, 0, 2);
