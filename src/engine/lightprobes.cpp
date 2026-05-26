@@ -127,10 +127,14 @@ void genlightprobes(bool force)
 
     int total = probedim.x*probedim.y*probedim.z;
     probes.growbuf(total);
-    loop(z, probedim.z) loop(y, probedim.y) loop(x, probedim.x)
+    loop(z, probedim.z)
     {
-        vec pos((x+0.5f)*step, (y+0.5f)*step, (z+0.5f)*step);
-        computeprobe(pos, probes.add());
+        renderprogress(float(z)/probedim.z, "generating light probes...");   // each probe does a full GI gather, so show progress
+        loop(y, probedim.y) loop(x, probedim.x)
+        {
+            vec pos((x+0.5f)*step, (y+0.5f)*step, (z+0.5f)*step);
+            computeprobe(pos, probes.add());
+        }
     }
     markprobesolidity();
     int buried = 0; loopv(probesolid) if(probesolid[i]) buried++;
