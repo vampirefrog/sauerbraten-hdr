@@ -256,6 +256,7 @@ the base texture's average × that surface's `vcolor` (colorscale), so a wall co
 | `giskybox` | 0 | per-map | sample the loaded skybox image as the GI light source + drive the direct sun from it |
 | `giemissive` | 1 | per-map | emissive (glow-map) textures act as GI area light sources; scales their emitted radiance (0 = off) |
 | `giemissivetexel` | 0 | per-map | 0 = per-slot average emission (fast); 1 = per-texel glow sampling at hit UV (vscale/offset/rotation matter, wants higher girays) |
+| `giemitdirect` / `giemitcell` | 1 / 16 | per-map | 1 = explicit area-light sampling of emissive surfaces (Source/VRAD texlight style — smooth, no noise/grazing-cutoff); 0 = old hemisphere-gather capture. `giemitcell` = emitter subdivision cell size (smaller = more accurate near field, slower) |
 | `gilava`..`gilava4` / `giwater`..`giwater4` / `giglass`..`giglass4` | 0 | per-map | per-variant emission scale for lava/water/glass materials as GI area lights (0 = off); radiance = material colour × scale |
 | `lightprobes` | 0 | per-map | **bake**+use ambient-cube model-lighting grid |
 | `lightprobegrid` | 128 | per-map | probe spacing (world units) |

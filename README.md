@@ -77,6 +77,11 @@ radiance (image-based lighting), rays that hit geometry pick up that surface's d
 trades quality for bake time. The bounce reflectance is the texture's average colour × its `vcolor`, so a
 red wall bleeds red.
 
+By default emissive surfaces are sampled as **explicit area lights** (`giemitdirect 1`) — each emissive
+surface is collected and integrated with a form factor + visibility ray, exactly like Source's VRAD
+"texlight" radiosity. This gives smooth, noise-free lighting with correct grazing falloff. `giemitdirect 0`
+falls back to capturing emission via random hemisphere rays (noisier).
+
 ### Emissive surfaces as light sources
 - **Textures**: any glow-mapped texture emits into the GI bake (`giemissive`). A coloured glow map emits its
   own colour; a grayscale glow *mask* emits the texture's own colour (so an orange panel casts orange).
