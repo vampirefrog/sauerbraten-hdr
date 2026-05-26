@@ -28,7 +28,7 @@ static int probestep = 0;        // world units between probes (probe centers at
 
 VARR(lightprobes, 0, 0, 1);          // bake (at calclight) and use the ambient-cube grid for model lighting
 VARR(lightprobegrid, 8, 128, 1024);  // target probe spacing in world units (bake time)
-VAR(showlightprobes, 0, 0, 1);       // debug: print/inspect probe state (see /lightprobeinfo)
+VAR(showlightprobes, 0, 0, 1);       // debug: draw a heatmap cross at each probe (blue=dim..red=bright); also /lightprobeinfo
 
 bool haslightprobes() { return lightprobes && probes.length() && probestep > 0; }
 
@@ -175,6 +175,37 @@ void loadlightprobes(stream *f)
     uchar rgbe[4];
     loopi(n) { ambientcube &ac = probes.add(); loopj(6) { f->read(rgbe, 4); ac.faces[j] = decodergbe(rgbe); } }
     markprobesolidity();   // recompute (not stored): the world geometry is loaded by now
+}
+
+// debug: draw a coloured cross at each non-buried probe (colour = its omnidirectional ambient), so you can see
+// where the probes are and how bright each one bakes. Toggle with `showlightprobes 1`.
+void renderlightprobes()
+{
+    if(!showlightprobes || !haslightprobes()) return;
+    notextureshader->set();
+    gle::defvertex();
+    float r = probestep*0.4f;
+    loop(z, probedim.z) loop(y, probedim.y) loop(x, probedim.x)
+    {
+        int idx = (z*probedim.y + y)*probedim.x + x;
+        if(idx < probesolid.length() && probesolid[idx]) continue;   // skip probes buried in geometry
+        vec c(0, 0, 0);
+        loopi(6) c.add(probes[idx].faces[i]);
+        float lum = (c.x + c.y + c.z)*(1.0f/18);   // mean of 6 faces, mean of channels
+        // heatmap (blue=dark .. green .. red=bright) at full saturation, so probes are visible on any background
+        // and you can read brightness: blue probes are dim, red/yellow probes are bright (over-bright = blown models)
+        vec col = lum < 0.25f ? vec(0, lum*4, 1)
+                : lum < 0.5f  ? vec(0, 1, 1-(lum-0.25f)*4)
+                : lum < 0.75f ? vec((lum-0.5f)*4, 1, 0)
+                :               vec(1, max(1-(lum-0.75f)*4, 0.0f), 0);
+        vec p((x+0.5f)*probestep, (y+0.5f)*probestep, (z+0.5f)*probestep);
+        gle::color(bvec(uchar(col.x*255), uchar(col.y*255), uchar(col.z*255)));
+        gle::begin(GL_LINES);
+        gle::attrib(vec(p).sub(vec(r, 0, 0))); gle::attrib(vec(p).add(vec(r, 0, 0)));
+        gle::attrib(vec(p).sub(vec(0, r, 0))); gle::attrib(vec(p).add(vec(0, r, 0)));
+        gle::attrib(vec(p).sub(vec(0, 0, r))); gle::attrib(vec(p).add(vec(0, 0, r)));
+        xtraverts += gle::end();
+    }
 }
 
 ICOMMAND(lightprobeinfo, "", (),

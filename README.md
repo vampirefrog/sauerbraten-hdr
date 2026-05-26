@@ -169,7 +169,8 @@ for sky/sun brightness (the sun disk is unclamped under `hdr`, so push these hig
 | `dumplms` | dump the CPU lightmap atlases to PNG (HDR/RNM decoded + tonemapped) |
 | `dumplmtexs` | dump the **GPU** lightmap textures to PNG and report their dimensions/type (debug) |
 | `lmnearest 0/1` | switch lightmap filtering to nearest-neighbour to inspect the raw lumel grid (debug) |
-| `lightprobeinfo` | report the baked light-probe grid (debug) |
+| `lightprobeinfo` | report the baked light-probe grid + the probe sampled at the camera (debug) |
+| `showlightprobes 0/1` | draw a heatmap cross at each (non-buried) light probe — blue = dim, red = bright — to see probe placement and brightness (debug) |
 | `debuglm` | fill lightmaps with solid debug colours and re-upload (debug) |
 
 ## Building

@@ -1926,6 +1926,7 @@ void gl_drawframe()
     rendermapmodels();
     rendergame(true);
     renderavatar();
+    renderlightprobes();   // light-probe debug overlay (showlightprobes)
 
     if(wireframe && editmode) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
@@ -2196,6 +2197,7 @@ void gl_drawhud()
         glDepthMask(GL_TRUE);
         glDisable(GL_DEPTH_TEST);
     }
+
 
     gettextres(w, h);
 
