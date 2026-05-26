@@ -1,0 +1,31 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # The vcxproj targets the v140_xp toolset (VS2015), which the runner doesn't ship; retarget to v143
+      # (VS2022). All dependencies (SDL2 / SDL2_image / SDL2_mixer / zlib import libs + headers) are vendored
+      # in src/lib64 and src/include, so no external setup is needed to build.
+      - name: Build (Release x64)
+        run: msbuild src/vcpp/sauerbraten.sln /m /v:minimal /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143
+
+      - name: Upload client binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: sauerbraten-hdr-win64
+          path: bin64/*.exe
+          if-no-files-found: error
