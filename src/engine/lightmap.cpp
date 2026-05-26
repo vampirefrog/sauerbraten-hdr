@@ -972,8 +972,12 @@ static void addemitter(const vec corner[4], const vec &cubecenter, const vec &ra
     nrm.mul(1.0f/area);
     vec facecenter = vec(corner[0]).add(corner[1]).add(corner[2]).add(corner[3]).mul(0.25f);
     if(nrm.dot(vec(facecenter).sub(cubecenter)) < 0) nrm.neg();   // emit outward, away from the solid
-    float lu = u.magnitude(), lv = v.magnitude();
-    int nu = clamp(int(ceilf(lu/max(giemitcell, 1.0f))), 1, 8), nv = clamp(int(ceilf(lv/max(giemitcell, 1.0f))), 1, 8);
+    float lu = u.magnitude(), lv = v.magnitude(), cell = max(giemitcell, 1.0f);
+    // subdivide by giemitcell along BOTH edges (so a long strip gets many cells along its length, not a few
+    // discrete blobs); cap only the TOTAL cells per surface, preserving aspect ratio, to bound bake cost.
+    int nu = max(int(ceilf(lu/cell)), 1), nv = max(int(ceilf(lv/cell)), 1);
+    const int maxcells = 1024;
+    if(nu*nv > maxcells) { float scl = sqrtf(float(maxcells)/(nu*nv)); nu = max(int(nu*scl), 1); nv = max(int(nv*scl), 1); }
     float cellarea = area/(nu*nv);
     loop(b, nv) loop(a, nu)
     {
@@ -1049,11 +1053,13 @@ static vec gatheremissive(lightmapworker *w, const vec &x, const vec &n, float t
         if(cosR <= 0) continue;
         float cosE = -dir.dot(e.normal);
         if(cosE <= 0) continue;
+        vec contrib = vec(e.radiance).mul(cosR*cosE*e.area/(M_PI*r2));
+        if(contrib.x + contrib.y + contrib.z < 0.02f) continue;   // negligible (far/grazing): skip before the visibility ray
         float dist = sqrtf(r2), maxd = dist - 2*tol;
         if(maxd <= 0) continue;
         vec start = vec(dir).mul(tol).add(x);
         if(shadowray(w->shadowraycache, start, dir, maxd, RAY_SHADOW|RAY_POLY) < maxd) continue;   // occluded
-        sum.add(vec(e.radiance).mul(cosR*cosE*e.area/(M_PI*r2)));
+        sum.add(contrib);
     }
     return sum;
 }
