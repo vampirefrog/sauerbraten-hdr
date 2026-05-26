@@ -916,9 +916,9 @@ struct animmodel : model
 
                 if(!(anim&ANIM_NOSKIN))
                 {
-                    extern int hdr;
+                    extern int hdr, drawtex;
                     useambientcube = false;
-                    if(hdr && haslightprobes())
+                    if(hdr && haslightprobes() && !drawtex)   // not for model-preview/minimap/envmap passes (they use explicit light)
                     {
                         // Valve ambient cube: light each normal from the 6 directional radiances baked into
                         // the probe grid (sky above, floor bounce below, walls around) -- "light from all sides".
