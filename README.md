@@ -100,6 +100,10 @@ players, the HUD weapon) from it instead of per-frame ray casts.
 - **Per-pixel ambient cube** (when `hdr` is on): every surfel is lit from the 6 baked directions, so a model
   gets the sky from above, the floor bounce from below and walls from the sides — true "light from all
   sides", in HDR (no LDR clamp), instead of a single light + flat fill.
+- **Per-mapmodel probes**: static mapmodels don't sample the grid (whose nearest node can sit in a hot sunlit
+  floor cell and blow the model out) — each gets its own ambient cube sampled from the radiosity solution at the
+  centre of its bounding box, baked into the map entity.
+- **Threaded bake**: the probe grid is baked across all CPU cores, shows a percentage, and can be skipped with ESC.
 - **Buried-probe handling**: probes that fall inside solid geometry bake black; they're detected and excluded
   from the interpolation (weights renormalised over the valid neighbours), so a model standing on the floor
   isn't dragged toward black by the probes under the surface. A finer `lightprobegrid` keeps a valid probe

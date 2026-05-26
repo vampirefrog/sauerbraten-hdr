@@ -534,7 +534,9 @@ struct batchedmodel
     dynent *d;
     int attached;
     occludequery *query;
-};  
+    vec probe[6];      // baked ambient cube (static mapmodels); used iff hasprobe
+    bool hasprobe;
+};
 struct modelbatch
 {
     model *m;
@@ -580,6 +582,7 @@ FVARP(modelminbright, 0, 0, 16);
 FVARP(hudgunbright, 0, 1, 16);
 FVARP(hudgunminbright, 0, 0, 16);
 float curmodelbright = 1, curmodelmin = 0;   // read by animmodel model-lighting setup
+const vec *curmodelcube = NULL;              // baked ambient cube for the current model (mapmodels), else NULL=use grid
 
 static void setmodellight(int flags)
 {
@@ -593,6 +596,7 @@ void renderbatchedmodel(model *m, batchedmodel &b)
     modelattach *a = NULL;
     if(b.attached>=0) a = &modelattached[b.attached];
     setmodellight(b.flags);
+    curmodelcube = b.hasprobe ? b.probe : NULL;
 
     int anim = b.anim;
     if(shadowmapping)
@@ -939,6 +943,8 @@ void rendermodel(entitylight *light, const char *mdl, int anim, const vec &o, fl
         b.pos = o;
         b.color = lightcolor;
         b.dir = lightdir;
+        b.hasprobe = light && light->hasprobe;
+        if(b.hasprobe) loopi(6) b.probe[i] = light->probe[i];
         b.anim = anim;
         b.yaw = yaw;
         b.pitch = pitch;
@@ -986,6 +992,7 @@ void rendermodel(entitylight *light, const char *mdl, int anim, const vec &o, fl
     }
 
     setmodellight(flags);
+    curmodelcube = light && light->hasprobe ? light->probe : NULL;
     m->render(anim, basetime, basetime2, o, yaw, pitch, d, a, lightcolor, lightdir, trans);
 
     if(flags&MDL_CULL_QUERY && d->query) endquery(d->query);

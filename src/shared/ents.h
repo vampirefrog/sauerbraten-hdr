@@ -17,8 +17,10 @@ struct entitylight
 {
     vec color, dir;
     int millis;
+    vec probe[6];      // baked ambient cube at the model's bbox centre (static mapmodels); used iff hasprobe
+    bool hasprobe;
 
-    entitylight() : color(1, 1, 1), dir(0, 0, 1), millis(-1) {}
+    entitylight() : color(1, 1, 1), dir(0, 0, 1), millis(-1), hasprobe(false) {}
 };
 
 enum

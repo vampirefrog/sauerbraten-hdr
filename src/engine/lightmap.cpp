@@ -1245,6 +1245,36 @@ bool bakeprobes(const vec *positions, vec *out, int count)
     return !probebakecancel;
 }
 
+// Static mapmodels get their own ambient cube sampled from the radiosity solution at the centre of their
+// bounding box, rather than the grid probe at the model origin (which can sit in a hot sunlit floor cell and
+// blow the model out). Baked at calclight time into each mapmodel entity's light.
+void bakemapmodelprobes()
+{
+    const vector<extentity *> &ents = entities::getents();
+    loopv(ents) ents[i]->light.hasprobe = false;
+    if(!haslightprobes() || !gi) return;
+
+    if(lightmapworkers.empty()) lightmapworkers.add(new lightmapworker);
+    lightmapworker *w = lightmapworkers[0];
+    resetshadowraycache(w->shadowraycache);
+    w->lights.setsize(0);
+    loopv(ents) if(ents[i]->type == ET_LIGHT) w->lights.add(ents[i]);
+
+    loopv(ents)
+    {
+        extentity &e = *ents[i];
+        if(e.type != ET_MAPMODEL) continue;
+        model *m = loadmodel(NULL, e.attr2);
+        if(!m) continue;
+        vec center, radius;
+        m->boundbox(center, radius);                 // bbox centre in model space
+        float yaw = e.attr1*RAD, cy = cosf(yaw), sy = sinf(yaw);
+        vec pos(e.o.x + center.x*cy - center.y*sy, e.o.y + center.x*sy + center.y*cy, e.o.z + center.z);
+        gatherprobe(w, pos, e.light.probe);
+        e.light.hasprobe = true;
+    }
+}
+
 VARR(blurlms, 0, 0, 2);
 VARR(blurskylight, 0, 0, 2);
 
@@ -2814,7 +2844,7 @@ void calclight(int *quality)
     if(!editmode) compressed.clear();
     initlights();
     // bake the ambient-cube probe grid only when opted in (genlightprobes(false) is a no-op if lightprobes is off)
-    if(!calclight_canceled) { renderbackground("generating light probes..."); genlightprobes(false); }
+    if(!calclight_canceled) { renderbackground("generating light probes..."); genlightprobes(false); bakemapmodelprobes(); }
     renderbackground("lighting done...");
     allchanged();
     if(calclight_canceled)

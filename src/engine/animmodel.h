@@ -934,8 +934,11 @@ struct animmodel : model
                         // Valve ambient cube: light each normal from the 6 directional radiances baked into
                         // the probe grid (sky above, floor bounce below, walls around) -- "light from all sides".
                         GLOBALPARAM(modelworld, matrix3(matrixstack[matrixpos]));
-                        vec cube[6]; getprobecube(matrixstack[matrixpos].gettranslation(), cube);
                         extern float curmodelbright, curmodelmin;
+                        extern const vec *curmodelcube;
+                        vec cube[6];
+                        if(curmodelcube) loopi(6) cube[i] = curmodelcube[i];   // mapmodel: its own bbox-centre radiosity probe
+                        else getprobecube(matrixstack[matrixpos].gettranslation(), cube);   // else the interpolated grid
                         loopi(6) cube[i].mul(curmodelbright).max(curmodelmin);   // viewmodel/model brightness knobs
                         GLOBALPARAM(ambientcube0, cube[0]); GLOBALPARAM(ambientcube1, cube[1]);
                         GLOBALPARAM(ambientcube2, cube[2]); GLOBALPARAM(ambientcube3, cube[3]);
