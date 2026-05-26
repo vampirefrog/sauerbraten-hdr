@@ -90,14 +90,17 @@ static void placeprobes()
     }
 }
 
-// bounding box of open (air) leaf cubes -- the region worth covering with probes (vs the whole world cube)
-static void airbounds(cube *c, const ivec &co, int size, ivec &bbmin, ivec &bbmax)
+// bounding boxes of the air (empty) leaf cubes and the solid (non-empty) leaf cubes, in one walk. The grid is
+// fitted to whichever is SMALLER -- the "built" region: an open-air map has bounded solids in a huge air volume
+// (fit solids), a map dug into a solid block has a huge solid filling the world and bounded air rooms (fit air).
+static void worldbounds(cube *c, const ivec &co, int size, ivec &amin, ivec &amax, ivec &smin, ivec &smax)
 {
     loopi(8)
     {
         ivec o(i, co, size);
-        if(c[i].children) airbounds(c[i].children, o, size/2, bbmin, bbmax);
-        else if(isempty(c[i])) { bbmin.min(o); bbmax.max(ivec(o).add(size)); }
+        if(c[i].children) worldbounds(c[i].children, o, size/2, amin, amax, smin, smax);
+        else if(isempty(c[i])) { amin.min(o); amax.max(ivec(o).add(size)); }
+        else                   { smin.min(o); smax.max(ivec(o).add(size)); }
     }
 }
 
@@ -111,15 +114,29 @@ void genlightprobes(bool force)
     clearlightprobes();
     if(!lightprobes && !force) return;
 
-    // fit the grid to the open-space (air) bounding box, not the whole world cube -- so the probe budget goes
-    // where models actually are, and the spacing can be finer for the same count
-    ivec bbmin(worldsize, worldsize, worldsize), bbmax(0, 0, 0);
-    if(worldroot) airbounds(worldroot, ivec(0, 0, 0), worldsize/2, bbmin, bbmax);
-    if(bbmin.x >= bbmax.x) { bbmin = ivec(0, 0, 0); bbmax = ivec(worldsize, worldsize, worldsize); }   // no air -> whole world
-    ivec bbsize = ivec(bbmax).sub(bbmin);
+    // fit the grid to the "built" region (smaller of the air vs solid bbox), not the whole world cube, so the
+    // probe budget goes where models are and the spacing can be finer for the same count
+    ivec amin(worldsize, worldsize, worldsize), amax(0, 0, 0), smin(worldsize, worldsize, worldsize), smax(0, 0, 0);
+    if(worldroot) worldbounds(worldroot, ivec(0, 0, 0), worldsize/2, amin, amax, smin, smax);
+    bool haveair = amin.x < amax.x, havesolid = smin.x < smax.x;
+    ivec bbmin, bbmax;
+    if(haveair && havesolid)
+    {
+        double av = double(amax.x-amin.x)*(amax.y-amin.y)*(amax.z-amin.z),
+               sv = double(smax.x-smin.x)*(smax.y-smin.y)*(smax.z-smin.z);
+        if(sv <= av) { bbmin = smin; bbmax = smax; }    // open-air map: fit the (smaller) solid geometry
+        else         { bbmin = amin; bbmax = amax; }    // dug into a block: fit the (smaller) air rooms
+    }
+    else if(havesolid) { bbmin = smin; bbmax = smax; }
+    else if(haveair)   { bbmin = amin; bbmax = amax; }
+    else { bbmin = ivec(0, 0, 0); bbmax = ivec(worldsize, worldsize, worldsize); }
 
+    ivec bbsize = ivec(bbmax).sub(bbmin);
     int step = max(lightprobegrid, 8), maxdim = max(bbsize.x, max(bbsize.y, bbsize.z));
     while(maxdim/step > 96) step *= 2;                  // cap cells/axis (now measured over the fitted box)
+    // a one-cell margin so the air right around the geometry (where models stand on top of solids) gets probes
+    loopk(3) { bbmin[k] = max(bbmin[k]-step, 0); bbmax[k] = min(bbmax[k]+step, worldsize); }
+    bbsize = ivec(bbmax).sub(bbmin);
     probestep = step;
     probeorigin = bbmin;
     loopk(3) probedim[k] = max(1, (bbsize[k] + step - 1)/step);
