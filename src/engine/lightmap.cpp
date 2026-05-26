@@ -1089,8 +1089,13 @@ static bool generatelightmap(lightmapworker *w, float lpu, const lerpvert *lv, i
     if((w->type&LM_TYPE) == LM_BUMPMAP0) memclear(w->raydata, (LM_MAXW + 4)*(LM_MAXH + 4));
     if((w->type&LM_TYPE) == LM_RNM0) loopi(3) memclear(w->rnmdata[i], (LM_MAXW + 4)*(LM_MAXH + 4));
 
-    origin1.sub(vec(ystep1).add(xstep1).mul(blurlms));
-    origin2.sub(vec(ystep2).add(xstep2).mul(blurlms));
+    // HDR lightmaps skip the blur (RGBE can't be blurred) and thus the trim, so they must also skip the
+    // blur padding/origin-shift below; otherwise the surface content stays offset by blurlms texels (shear).
+    if(!(w->type&LM_HDR))
+    {
+        origin1.sub(vec(ystep1).add(xstep1).mul(blurlms));
+        origin2.sub(vec(ystep2).add(xstep2).mul(blurlms));
+    }
 
     int aasample = min(1 << lmaa, 4);
     int stride = aasample*(w->w+1);
@@ -1746,7 +1751,7 @@ static int setupsurface(lightmapworker *w, plane planes[2], int numplanes, const
     int lw = clamp(int(ceil((cmax.x - cmin.x + 1)*lpu)), LM_MINW, LM_MAXW), lh = clamp(int(ceil((cmax.y - cmin.y + 1)*lpu)), LM_MINH, LM_MAXH);
     w->w = lw;
     w->h = lh;
-    if(!preview)
+    if(!preview && !(w->type&LM_HDR))   // HDR isn't blurred/trimmed, so it must not get the blur padding either (else shear)
     {
         w->w += 2*blurlms;
         w->h += 2*blurlms;
@@ -2675,6 +2680,22 @@ VARF(fullbrightlevel, 0, 128, 255, setfullbrightlevel(fullbrightlevel));
 
 vector<LightMapTexture> lightmaptexs;
 
+// debug: switch lightmap atlas filtering to nearest-neighbour so the raw lumel grid is visible
+// (reveals exact alignment + any per-lumel GI noise). Re-applied after each (re)bake via initlights.
+void setlightmapfilter();
+VARFP(lmnearest, 0, 0, 1, setlightmapfilter());
+void setlightmapfilter()
+{
+    GLint f = lmnearest ? GL_NEAREST : GL_LINEAR;
+    loopv(lightmaptexs)
+    {
+        if(!lightmaptexs[i].id) continue;
+        glBindTexture(GL_TEXTURE_2D, lightmaptexs[i].id);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, f);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
+    }
+}
+
 static void rotatenormals(LightMap &lmlv, int x, int y, int w, int h, bool flipx, bool flipy, bool swapxy)
 {
     uchar *lv = lmlv.data + 3*(y*LM_PACKW + x);
@@ -3051,6 +3072,7 @@ void initlights()
     }
     brightengeom = false;
     shouldlightents = true;
+    if(lmnearest) setlightmapfilter();   // keep nearest-neighbour debug filtering across rebakes
 }
 
 static inline void fastskylight(const vec &o, float tolerance, uchar *skylight, int flags = RAY_ALPHAPOLY, extentity *t = NULL, bool fast = false)
@@ -3225,6 +3247,32 @@ void dumplms()
 }
 
 COMMAND(dumplms, "");
+
+// DEBUG: read back the actual GPU lightmap atlas TEXTURES (post-upload) and dump them, reporting each
+// texture's real dimensions/type. Comparing these to dumplms (CPU data) localises an upload shear/shift.
+ICOMMAND(dumplmtexs, "", (),
+{
+    const char *map = game::getclientmap(); const char *name = strrchr(map, '/'); if(name) name++; else name = map;
+    loopv(lightmaptexs)
+    {
+        LightMapTexture &t = lightmaptexs[i];
+        if(!t.id || t.w <= 1 || t.h <= 1) continue;
+        bool hdr = (t.type&LM_HDR) != 0;
+        conoutf("lmtex %d: %dx%d type=0x%02x %s", i, t.w, t.h, t.type, hdr ? "HDR(fp16)" : "LDR(rgb8)");
+        glBindTexture(GL_TEXTURE_2D, t.id);
+        ImageData out(t.w, t.h, 3);
+        if(hdr)
+        {
+            float *fbuf = new float[size_t(t.w)*t.h*3];
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_FLOAT, fbuf);
+            loop(p, t.w*t.h) loopk(3) out.data[p*3+k] = uchar(255.0f * (fbuf[p*3+k] / (fbuf[p*3+k] + 1.0f)));
+            delete[] fbuf;
+        }
+        else glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, out.data);
+        defformatstring(buf, "lmtex_%s_%d.png", name, i);
+        savepng(buf, out, true);
+    }
+});
 
 // DEBUG: overwrite every lightmap with a distinct solid colour and re-upload. If world surfaces then
 // show these colours, the lightmaps ARE being sampled; if they stay unchanged (e.g. white/fullbright),
