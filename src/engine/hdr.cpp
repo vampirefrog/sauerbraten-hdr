@@ -115,6 +115,9 @@ bool beginhdr()
     GLOBALPARAMF(glowscale, usehdr() && hdremissive ? emissivescale : 1.0f);
     // model glow is a visibility highlight, not an HDR area light; clamp it under HDR so it doesn't bloom out
     GLOBALPARAMF(modelglowmax, usehdr() ? modelglowclamp : 1.0e6f);
+    // models use a x2 "overbright" texture convention that LDR clamps away; under HDR (linear, tonemapped) that
+    // doubling blows bright-textured models out, so drop it -> models render at true albedo x light, like the world
+    GLOBALPARAMF(modeltexscale, usehdr() ? 1.0f : 2.0f);
 
     if(!usehdr()) { scenefbo = 0; return false; }
     setuphdr(screenw, screenh);

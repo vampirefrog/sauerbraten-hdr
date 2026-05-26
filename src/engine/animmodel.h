@@ -161,9 +161,9 @@ struct animmodel : model
                 // ~0.29, so models read near-black against an HDR-bright world. Instead drive the lighting from
                 // the (still-unclamped) HDR lightcolor luminance -- the lit side reaches the true light level
                 // and the omnidirectional floor (ambient*lum, e.g. the probe's all-sides fill) stays bright.
-                float lum = max(max(lightcolor.x, lightcolor.y), lightcolor.z),
+                float lum = min(max(max(lightcolor.x, lightcolor.y), lightcolor.z), 1.0f),   // cap at 1: lit side = albedo*light, like the world
                       flr = max(ambient, mincolor) * lum;
-                lsx = lum - flr; lsy = 0; lsz = flr; lmax = 64;   // i=1:lum  i=0:flr
+                lsx = lum - flr; lsy = 0; lsz = flr; lmax = 1;   // i=1:lum  i=0:flr
             }
             else
             {
