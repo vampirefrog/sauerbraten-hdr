@@ -126,6 +126,7 @@ All new vars default to off/stock. "per-map" vars are bake-time and saved in the
 | `giemissive` | 1 | emissive glow-map textures as GI area lights (scale; 0 = off) |
 | `giemissivetexel` | 0 | 0 = per-slot average emission; 1 = per-texel glow sampling |
 | `gilava`..`gilava4` / `giwater`..`giwater4` / `giglass`..`giglass4` | 0 | per-variant emission scale for lava/water/glass materials |
+| `giemitdirect` / `giemitcell` | 1 / 16 | emissive surfaces as explicit area lights (Source/VRAD texlight: smooth, no noise/cutoff) vs `0` = hemisphere gather; cell = emitter subdivision size (lower = finer/continuous, slower) |
 | `giskybox` | 0 | sample the loaded skybox as the GI light + drive the sun from it |
 | `lightprobes` / `lightprobegrid` | 0 / 128 | bake + use the ambient-cube model-lighting grid / its spacing |
 
