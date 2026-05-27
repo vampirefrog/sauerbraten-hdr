@@ -136,6 +136,7 @@ void loadworldpatches(stream *f)
 #ifndef STANDALONE
 
 extern int currentedittex();   // octaedit.cpp: editor's current texture (declared locally, like entdrag)
+extern selinfo sel;            // current edit selection (world.cpp); used to place new patches
 
 // edit state (defined up here so the creation commands can reference them)
 int patchhover = -1, patchhovercp = -1;   // patch + control-point index under the crosshair
@@ -146,16 +147,36 @@ int patchmoving = 0;                       // 0 idle, 1 first drag frame, 2 drag
 
 VARP(patchtess, 1, 4, 16);   // default subdivision level for new patches
 
+// Spawn a flat patch on the selected face of the selection volume, spanning the selection (or a
+// default size centred on the face when nothing is selected), offset slightly outward along the
+// face normal -- mirroring how dropentity() places a new entity (see world.cpp).
 ICOMMAND(newpatch, "i", (int *size),
 {
     if(noedit(true)) return;
-    int s = *size > 0 ? *size : 32;
-    vec center = vec(camdir).mul(48).add(camera1->o);   // in front of the camera
+    int d = dimension(sel.orient);
+    int dc = dimcoord(sel.orient);
+    int g = sel.grid;
+    float er = sel.s[R[d]]*g;       // selection extent in the two in-plane axes
+    float ec = sel.s[C[d]]*g;
+    float def = *size > 0 ? *size : g*4;
+    if(er < 1) er = def;
+    if(ec < 1) ec = def;
+    vec base(sel.o);
+    if(sel.s[R[d]] < 1) base[R[d]] = sel.o[R[d]] + g*0.5f - er*0.5f;   // no extent: centre on the face cell
+    if(sel.s[C[d]] < 1) base[C[d]] = sel.o[C[d]] + g*0.5f - ec*0.5f;
+    float dplane = sel.o[D[d]] + (dc ? sel.s[D[d]]*g : 0);
+    float off = (dc ? 1 : -1) * max(2.0f, g*0.5f);      // lift off the face like an entity's radius offset
+
     bezpatch *p = new bezpatch;
     p->tess = patchtess;
     p->vslot = currentedittex();                        // adopt the editor's current texture
-    loop(y, 3) loop(x, 3)                                // flat horizontal 3x3 patch
-        p->cp(x, y) = vec(center.x + (x-1)*0.5f*s, center.y + (y-1)*0.5f*s, center.z);
+    loop(y, 3) loop(x, 3)
+    {
+        vec &cp = p->cp(x, y);
+        cp[R[d]] = base[R[d]] + x*0.5f*er;
+        cp[C[d]] = base[C[d]] + y*0.5f*ec;
+        cp[D[d]] = dplane + off;
+    }
     p->dirty = true;
     patches.add(p);
     conoutf("created patch %d (%d total)", patches.length()-1, patches.length());
