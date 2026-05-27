@@ -142,6 +142,18 @@ void loadworldpatches(stream *f)
 extern int currentedittex();   // octaedit.cpp: editor's current texture (declared locally, like entdrag)
 extern selinfo sel;            // current edit selection (world.cpp); used to place new patches
 extern void createtexture(int tnum, int w, int h, void *pixels, int clamp, int filter, GLenum component, GLenum subtarget, int pw, int ph, int pitch, bool resize, GLenum format, bool swizzle);
+extern void calctexgen(VSlot &vslot, int dim, vec4 &sgen, vec4 &tgen);   // cube texture projection (octarender.cpp)
+extern const vec orientation_tangent[8][3];                              // per-orientation tangent the cube uses
+
+// dominant axis of a patch's average normal -- the "face" it projects onto, like a cube face's dimension
+static int patchdim(bezpatch *p)
+{
+    vec n(0, 0, 0);
+    loopv(p->norms) n.add(p->norms[i]);
+    if(n.iszero()) return 2;
+    vec a(fabs(n.x), fabs(n.y), fabs(n.z));
+    return a.x >= a.y && a.x >= a.z ? 0 : (a.y >= a.z ? 1 : 2);
+}
 
 void bezpatch::freelm()
 {
@@ -182,6 +194,10 @@ bool getpatchgrid(int i, const vec *&verts, const vec *&norms, const vec *&tange
     loopvj(p->tcs) { ulen = max(ulen, p->tcs[j].x); vlen = max(vlen, p->tcs[j].y); }
     gw = clamp(int(ulen/patchlmscale) + 1, 2, 128);
     gh = clamp(int(vlen/patchlmscale) + 1, 2, 128);
+    // tangent frame matches the cube's (orientation_tangent for the patch's dominant face), so the
+    // normal map -- sampled in the same calctexgen space the render uses -- bumps consistently.
+    int dim = patchdim(p);
+    vec stan = orientation_tangent[lookupvslot(p->vslot, false).rotation][dim];
     bpos.setsize(0); bnrm.setsize(0); btang.setsize(0);
     loopj(gh) loopi(gw)
     {
@@ -192,7 +208,7 @@ bool getpatchgrid(int i, const vec *&verts, const vec *&norms, const vec *&tange
         vec n;
         n.cross(tu, tv);
         n = n.iszero() ? vec(0, 0, 1) : n.normalize();
-        vec tang = tu.iszero() ? vec(1, 0, 0) : vec(tu).normalize();
+        vec tang = vec(stan);
         tang.sub(vec(n).mul(n.dot(tang)));
         tang = tang.iszero() ? vec(1, 0, 0) : tang.normalize();
         bpos.add(pos); bnrm.add(n); btang.add(tang);
@@ -322,18 +338,23 @@ void renderpatches()
         glActiveTexture_(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, (glow ? glow : notexture)->id);
         if(baked) loopk(3) { glActiveTexture_(GL_TEXTURE3+k); glBindTexture(GL_TEXTURE_2D, p->lmtex[k]); }
         glActiveTexture_(GL_TEXTURE0);
-        GLOBALPARAMF(pcolor, vs.colorscale.x, vs.colorscale.y, vs.colorscale.z, 1.0f);
+        GLOBALPARAMF(pcolor, 2*vs.colorscale.x, 2*vs.colorscale.y, 2*vs.colorscale.z, 1.0f);   // 2x overbright, like world surfaces
         GLOBALPARAMF(pbump, norm ? 1.0f : 0.0f);
         GLOBALPARAMF(pglow, glow ? 1.0f : 0.0f);
-        float inv = 1.0f / (patchtexscale * (vs.scale > 0 ? vs.scale : 1));
+        // diffuse/normal coords via the same planar texgen the cube uses (matches orientation/scale/rotation)
+        int dim = patchdim(p);
+        vec4 sgen, tgen;
+        calctexgen(vs, dim, sgen, tgen);
         gle::begin(GL_TRIANGLES);
         loopvj(p->tris)
         {
             ushort idx = p->tris[j];
-            gle::attrib(p->verts[idx]);
+            const vec &pos = p->verts[idx];
+            gle::attrib(pos);
             gle::attrib(p->norms[idx]);
             gle::attrib(p->tangents[idx]);
-            gle::attrib(vec2(p->tcs[idx]).mul(inv));
+            gle::attrib(vec2(sgen.x*pos.x + sgen.y*pos.y + sgen.z*pos.z + sgen.w,
+                             tgen.x*pos.x + tgen.y*pos.y + tgen.z*pos.z + tgen.w));
             gle::attrib(p->lmtc[idx]);
         }
         xtraverts += gle::end();

@@ -1320,13 +1320,26 @@ void bakepatchlights()
         {
             vec pos = verts[j], N = norms[j], T = tangents[j], B;
             B.cross(N, T);
+            // directional radiance at the true normal (the diffuse reference) and at each HL2 basis dir
+            vec cdir = gatherdirect(w, pos, N);
+            if(dogi) { vec g(0, 0, 0); calcgi(w, pos, N, 0.5f, g, 1); cdir.add(g); }
+            vec rnm[3];
             loopk(3)
             {
                 vec wb = vec(T).mul(hl2[k].x).add(vec(B).mul(hl2[k].y)).add(vec(N).mul(hl2[k].z));
                 if(wb.iszero()) wb = N; else wb.normalize();
-                vec rad = gatherdirect(w, pos, wb).add(amb);
-                if(dogi) { vec g(0, 0, 0); calcgi(w, pos, wb, 0.5f, g, 1); rad.add(g); }
-                encodergbe(rad.mul(1.0f/255.0f), &out[k][j*4]);
+                rnm[k] = gatherdirect(w, pos, wb);
+                if(dogi) { vec g(0, 0, 0); calcgi(w, pos, wb, 0.5f, g, 1); rnm[k].add(g); }
+            }
+            // normalize the 3 basis to the diffuse magnitude (preserves directional contrast -> visible bump),
+            // then add flat sky -- the same scheme finishlightmap() uses for world RNM lightmaps.
+            float rawl = rnm[0].x+rnm[0].y+rnm[0].z + rnm[1].x+rnm[1].y+rnm[1].z + rnm[2].x+rnm[2].y+rnm[2].z;
+            float dirl = max(cdir.x + cdir.y + cdir.z, 0.0f);
+            float comp = rawl > 1.0f ? min(3.0f*dirl/rawl, 3.0f) : 0.0f;
+            loopk(3)
+            {
+                vec bb = vec(rnm[k]).mul(comp).add(amb).min(vec(2*255.0f, 2*255.0f, 2*255.0f));
+                encodergbe(bb.mul(1.0f/255.0f), &out[k][j*4]);
             }
         }
         setpatchlm(i, out[0], out[1], out[2], gw, gh);
