@@ -537,6 +537,7 @@ extern bool pointinsel(const selinfo &sel, const vec &o);
 
 extern void resetmap();
 extern void startmap(const char *name);
+extern void clearextramapvars();
 
 // rendermodel
 struct mapmodelinfo { string name; model *m; };

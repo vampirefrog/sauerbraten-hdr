@@ -2,6 +2,30 @@
 
 #include "engine.h"
 
+// Normal map vars that simply aren't registered in THIS build (e.g. the render vars hdrlightmaps/atmo/gi/fog/
+// skylight/... only exist in client-compiled files, not the dedicated server) are carried through a load/save
+// round-trip verbatim, so the server doesn't strip them when it re-serializes an edited map. Captured on load,
+// re-emitted on save alongside the registered vars.
+struct extramapvar
+{
+    char *name;
+    int type;
+    int ival;
+    float fval;
+    char *sval;
+};
+static vector<extramapvar> extramapvars;
+
+void clearextramapvars()
+{
+    loopv(extramapvars)
+    {
+        delete[] extramapvars[i].name;
+        if(extramapvars[i].sval) delete[] extramapvars[i].sval;
+    }
+    extramapvars.shrink(0);
+}
+
 void validmapname(char *dst, const char *src, const char *prefix = NULL, const char *alt = "untitled", size_t maxlen = 100)
 {
     if(prefix) while(*prefix) *dst++ = *prefix++;
@@ -933,6 +957,7 @@ bool save_world(const char *mname, bool nolms)
     {
         if((id.type == ID_VAR || id.type == ID_FVAR || id.type == ID_SVAR) && id.flags&IDF_OVERRIDE && !(id.flags&IDF_READONLY) && id.flags&IDF_OVERRIDDEN) hdr.numvars++;
     });
+    hdr.numvars += extramapvars.length();
     lilswap(&hdr.version, 9);
     f->write(&hdr, sizeof(hdr));
    
@@ -961,6 +986,24 @@ bool save_world(const char *mname, bool nolms)
                 break;
         }
     });
+
+    loopv(extramapvars)
+    {
+        extramapvar &e = extramapvars[i];
+        f->putchar(e.type);
+        f->putlil<ushort>(strlen(e.name));
+        f->write(e.name, strlen(e.name));
+        switch(e.type)
+        {
+            case ID_VAR:  f->putlil<int>(e.ival); break;
+            case ID_FVAR: f->putlil<float>(e.fval); break;
+            case ID_SVAR:
+                f->putlil<ushort>(e.sval ? strlen(e.sval) : 0);
+                if(e.sval) f->write(e.sval, strlen(e.sval));
+                break;
+        }
+        if(dbgvars) conoutf(CON_DEBUG, "wrote passthrough var %s", e.name);
+    }
 
     if(dbgvars) conoutf(CON_DEBUG, "wrote %d vars", hdr.numvars);
 
@@ -1106,7 +1149,7 @@ bool load_world(const char *mname, const char *cname)        // still supports a
     setvar("mapscale", worldscale, true, false);
 
     renderprogress(0, "loading vars...");
- 
+
     loopi(hdr.numvars)
     {
         int type = f->getchar(), ilen = f->getlil<ushort>();
@@ -1116,24 +1159,28 @@ bool load_world(const char *mname, const char *cname)        // still supports a
         if(ilen >= MAXSTRLEN) f->seek(ilen - (MAXSTRLEN-1), SEEK_CUR);
         ident *id = getident(name);
         bool exists = id && id->type == type && id->flags&IDF_OVERRIDE;
+        // ident not present in this build at all: preserve verbatim so we don't strip it on the next save.
+        bool unknown = !id;
         switch(type)
         {
             case ID_VAR:
             {
                 int val = f->getlil<int>();
                 if(exists && id->minval <= id->maxval) setvar(name, val);
+                else if(unknown) { extramapvar &e = extramapvars.add(); e.name = newstring(name); e.type = type; e.ival = val; e.fval = 0; e.sval = NULL; }
                 if(dbgvars) conoutf(CON_DEBUG, "read var %s: %d", name, val);
                 break;
             }
- 
+
             case ID_FVAR:
             {
                 float val = f->getlil<float>();
                 if(exists && id->minvalf <= id->maxvalf) setfvar(name, val);
+                else if(unknown) { extramapvar &e = extramapvars.add(); e.name = newstring(name); e.type = type; e.ival = 0; e.fval = val; e.sval = NULL; }
                 if(dbgvars) conoutf(CON_DEBUG, "read fvar %s: %f", name, val);
                 break;
             }
-    
+
             case ID_SVAR:
             {
                 int slen = f->getlil<ushort>();
@@ -1142,6 +1189,7 @@ bool load_world(const char *mname, const char *cname)        // still supports a
                 val[min(slen, MAXSTRLEN-1)] = '\0';
                 if(slen >= MAXSTRLEN) f->seek(slen - (MAXSTRLEN-1), SEEK_CUR);
                 if(exists) setsvar(name, val);
+                else if(unknown) { extramapvar &e = extramapvars.add(); e.name = newstring(name); e.type = type; e.ival = 0; e.fval = 0; e.sval = newstring(val); }
                 if(dbgvars) conoutf(CON_DEBUG, "read svar %s: %s", name, val);
                 break;
             }
