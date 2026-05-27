@@ -367,7 +367,8 @@ bool editmoveplane(const vec &o, const vec &ray, int d, float off, vec &handle, 
 inline bool isheightmap(int orient, int d, bool empty, cube *c);
 extern void entdrag(const vec &ray);
 extern void editpatches(const vec &ray);   // bezpatch.cpp (declared locally, like entdrag)
-extern int patchmoving;
+extern float raypatchcp(const vec &o, const vec &ray);
+extern int patchmoving, patchhover, patchhovercp;
 extern bool hoveringonent(int ent, int orient);
 extern void renderentselection(const vec &o, const vec &ray, bool entmoving);
 extern float rayent(const vec &o, const vec &ray, float radius, int mode, int size, int &orient, int &ent);
@@ -417,8 +418,6 @@ void rendereditcursor()
     }
     else
     {
-        editpatches(camdir);   // update control-point hover (no-op drag when idle)
-
         ivec w;
         float sdist = 0, wdist = 0, t;
         int entorient = 0, ent = -1;
@@ -439,7 +438,17 @@ void rendereditcursor()
                 }
             }
 
-        if((hovering = hoveringonent(hidecursor ? -1 : ent, entorient)))
+        // bezier control points pick like entity markers: nearest box hit under the crosshair wins
+        float pdist = hidecursor ? 1e16f : raypatchcp(player->o, camdir);
+        bool cphover = patchhover >= 0 && pdist <= wdist;
+        if(!cphover) patchhover = patchhovercp = -1;
+
+        if(cphover)
+        {
+            hoveringonent(-1, entorient);   // a control point is under the crosshair: no cube/ent select
+            hovering = true;
+        }
+        else if((hovering = hoveringonent(hidecursor ? -1 : ent, entorient)))
         {
            if(!havesel)
            {

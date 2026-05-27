@@ -180,35 +180,35 @@ void renderpatches()
 
 extern bool editmoveplane(const vec &o, const vec &ray, int d, float off, vec &handle, vec &dest, bool first);
 extern void boxs3D(const vec &o, vec s, int g);
+extern int entselradius;   // world.cpp: size of an entity position marker; control points match it
 
 int patchhover = -1, patchhovercp = -1;   // patch + control-point index under the crosshair
 int patchmoving = 0;                       // 0 idle, 1 first drag frame, 2 dragging
-FVARP(patchhandlesize, 0.5f, 2.0f, 16.0f); // half-extent of a control-point handle cube
 
-// squared perpendicular distance from p to the ray (o,dir); t = signed distance along dir
-static float raypointdist2(const vec &o, const vec &dir, const vec &p, float &t)
-{
-    vec op = vec(p).sub(o);
-    t = op.dot(dir);
-    if(t <= 0) { t = 0; return op.squaredlen(); }
-    return vec(dir).mul(t).add(o).squaredist(p);
-}
-
-void updatepatchhover(const vec &o, const vec &ray)
+// Pick the control point under the crosshair exactly like an entity marker: ray vs an
+// entselradius-sized box around each point, nearest hit wins. Sets patchhover/patchhovercp and
+// returns the hit distance (1e16 if none) so the editor can compare against world/entity hits.
+float raypatchcp(const vec &o, const vec &ray)
 {
     patchhover = patchhovercp = -1;
     float best = 1e16f;
+    int orient = 0;
     loopv(patches)
     {
         bezpatch *p = patches[i];
         loopvj(p->ctrl)
         {
-            float t;
-            float d2 = raypointdist2(o, ray, p->ctrl[j], t);
-            float pr = max(patchhandlesize*1.5f, t*0.025f);   // grows with distance for easy picking
-            if(t > 0 && d2 < pr*pr && t < best) { best = t; patchhover = i; patchhovercp = j; }
+            vec bo = vec(p->ctrl[j]).sub(entselradius), bs = vec(entselradius*2);
+            float dist = 1e16f;
+            if(rayboxintersect(bo, bs, o, ray, dist, orient) && dist < best)
+            {
+                best = dist;
+                patchhover = i;
+                patchhovercp = j;
+            }
         }
     }
+    return best;
 }
 
 void patchdrag(const vec &ray)
@@ -227,11 +227,10 @@ void patchdrag(const vec &ray)
     patchmoving = 2;
 }
 
-// called once per frame from rendereditcursor
+// called from rendereditcursor while a drag is in progress
 void editpatches(const vec &ray)
 {
     if(patchmoving) patchdrag(ray);
-    else updatepatchhover(player->o, ray);
 }
 
 void renderpatchhandles()
@@ -241,6 +240,7 @@ void renderpatchhandles()
         bezpatch *p = patches[i];
         // control net
         gle::colorub(60, 120, 220);
+        gle::defvertex();
         gle::begin(GL_LINES);
         loop(y, p->rows) loop(x, p->cols)
         {
@@ -248,13 +248,13 @@ void renderpatchhandles()
             if(y+1 < p->rows) { gle::attrib(p->cp(x, y)); gle::attrib(p->cp(x, y+1)); }
         }
         xtraverts += gle::end();
-        // handle cubes
+        // control-point markers, drawn like entity position markers (green box, red when hovered)
         loopvj(p->ctrl)
         {
             bool hov = i==patchhover && j==patchhovercp;
-            if(hov) gle::colorub(255, 240, 40); else gle::colorub(40, 200, 90);
-            float h = patchhandlesize;
-            boxs3D(vec(p->ctrl[j]).sub(h), vec(2*h), 1);
+            vec eo = vec(p->ctrl[j]).sub(entselradius), es = vec(entselradius*2);
+            gle::colorub(hov ? 150 : 0, hov ? 0 : 40, 0);
+            boxs3D(eo, es, 1);
         }
     }
 }

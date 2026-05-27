@@ -53,8 +53,9 @@ extern void saveworldpatches(stream *f);   // self-describing section (leading c
 extern void loadworldpatches(stream *f);
 #ifndef STANDALONE
 extern void renderpatches();
-extern void editpatches(const vec &ray);   // per-frame hover/drag of control points (from rendereditcursor)
-extern int patchmoving;
+extern void editpatches(const vec &ray);   // continue an in-progress control-point drag
+extern float raypatchcp(const vec &o, const vec &ray);  // pick control point under crosshair (entity-style)
+extern int patchmoving, patchhover, patchhovercp;
 #endif
 
 #endif
