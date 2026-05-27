@@ -1037,6 +1037,10 @@ bool save_world(const char *mname, bool nolms)
     renderprogress(0, "saving octree...");
     savec(worldroot, ivec(0, 0, 0), worldsize>>1, f, nolms);
 
+    // bezier patches: geometry, so saved on both client and server (independent of lightmaps).
+    // Self-describing (leading count) and placed right after the octree -- see loadworldpatches.
+    saveworldpatches(f);
+
 #ifndef STANDALONE
     // lightmaps/pvs/lightprobes/blendmap: only when saving with baked data. The server
     // always saves with nolms (it has none of these), so this never runs there.
@@ -1292,6 +1296,10 @@ bool load_world(const char *mname, const char *cname)        // still supports a
 
     renderprogress(0, "validating...");
     validatec(worldroot, hdr.worldsize>>1);
+
+    // bezier patches follow the octree (version>=35); read on both client and server.
+    clearpatches();
+    if(hdr.version >= 35 && !failed) loadworldpatches(f);
 
 #ifndef STANDALONE
     // lightmaps / pvs / light probes / blendmap follow the octree. The server never has

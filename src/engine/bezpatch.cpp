@@ -70,6 +70,55 @@ void bezpatch::boundsphere(vec &center, float &radius) const
     radius = sqrtf(r2);
 }
 
+// ---- serialization (.ogz section, MAPVERSION>=35; runs on client and server) ----
+
+void saveworldpatches(stream *f)
+{
+    f->putlil<int>(patches.length());
+    loopv(patches)
+    {
+        bezpatch *p = patches[i];
+        f->putlil<ushort>(p->cols);
+        f->putlil<ushort>(p->rows);
+        f->putlil<int>(p->vslot);
+        f->putlil<ushort>(p->tess);
+        loopvj(p->ctrl)
+        {
+            f->putlil<float>(p->ctrl[j].x);
+            f->putlil<float>(p->ctrl[j].y);
+            f->putlil<float>(p->ctrl[j].z);
+        }
+    }
+}
+
+void loadworldpatches(stream *f)
+{
+    clearpatches();
+    int n = f->getlil<int>();
+    if(n < 0 || n > 100000) return;             // guard against corruption
+    loopi(n)
+    {
+        int cols = f->getlil<ushort>(), rows = f->getlil<ushort>();
+        int vslot = f->getlil<int>(), tess = f->getlil<ushort>();
+        // sanity: odd dims in a sane range; bail out cleanly on garbage
+        if(cols < 3 || rows < 3 || cols > 99 || rows > 99 || !(cols&1) || !(rows&1)) return;
+        bezpatch *p = new bezpatch;
+        p->setdims(cols, rows);
+        p->vslot = vslot;
+        p->tess = clamp(tess, 1, 16);
+        loopvj(p->ctrl)
+        {
+            p->ctrl[j].x = f->getlil<float>();
+            p->ctrl[j].y = f->getlil<float>();
+            p->ctrl[j].z = f->getlil<float>();
+        }
+        p->dirty = true;
+        patches.add(p);
+    }
+}
+
+#ifndef STANDALONE
+
 // ---- creation -------------------------------------------------------------
 
 VARP(patchtess, 1, 4, 16);   // default subdivision level for new patches
@@ -95,6 +144,8 @@ ICOMMAND(clearpatches, "", (),
     clearpatches();
     conoutf("cleared %d patches", n);
 });
+
+ICOMMAND(patchcount, "", (), { conoutf("%d patches", patches.length()); intret(patches.length()); });
 
 // ---- rendering (Phase 1: flat-shaded solid + control net in edit mode) -----
 
@@ -137,3 +188,5 @@ void renderpatches()
 
     glEnable(GL_CULL_FACE);
 }
+
+#endif // !STANDALONE

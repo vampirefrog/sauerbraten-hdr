@@ -10,6 +10,7 @@
 #include "glstub.h"
 #include "octa.h"
 #include "texture.h"
+#include "bezpatch.h"   // data model + serialization (rendering inside is STANDALONE-guarded)
 // cube-surface helpers normally declared in lightmap.h (a client-only header); the server
 // gets render-independent re-implementations from serverengine.cpp.
 extern void brightencube(cube &c);

@@ -158,6 +158,7 @@ SERVER_OBJS= \
 	engine/world-standalone.o \
 	engine/octaedit-standalone.o \
 	engine/texture-standalone.o \
+	engine/bezpatch-standalone.o \
 	engine/serverengine-standalone.o \
 	fpsgame/entities-standalone.o \
 	fpsgame/server-standalone.o

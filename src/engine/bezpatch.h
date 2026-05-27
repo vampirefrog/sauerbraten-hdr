@@ -49,6 +49,10 @@ struct bezpatch
 extern vector<bezpatch *> patches;
 
 extern void clearpatches();
+extern void saveworldpatches(stream *f);   // self-describing section (leading count), version>=35
+extern void loadworldpatches(stream *f);
+#ifndef STANDALONE
 extern void renderpatches();
+#endif
 
 #endif
