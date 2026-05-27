@@ -397,6 +397,15 @@ ICOMMAND(patchcp, "iifff", (int *patch, int *cp, float *x, float *y, float *z),
     patches[*patch]->dirty = true;
 });
 
+// set a patch's texture/material vslot directly (scripting/testing)
+ICOMMAND(patchsetvslot, "ii", (int *patch, int *vslot),
+{
+    if(noedit(true)) return;
+    if(!patches.inrange(*patch)) return;
+    patches[*patch]->vslot = *vslot;
+    patches[*patch]->dirty = true;
+});
+
 // move a control point by a delta (scripting/testing)
 ICOMMAND(patchnudge, "iifff", (int *patch, int *cp, float *dx, float *dy, float *dz),
 {
