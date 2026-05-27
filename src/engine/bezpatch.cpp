@@ -180,47 +180,62 @@ void renderpatches()
 
 extern bool editmoveplane(const vec &o, const vec &ray, int d, float off, vec &handle, vec &dest, bool first);
 extern void boxs3D(const vec &o, vec s, int g);
+extern void boxs(int orient, vec o, const vec &s);
+extern void boxs(int orient, vec o, const vec &s, float size);
 extern int entselradius;   // world.cpp: size of an entity position marker; control points match it
 
 int patchhover = -1, patchhovercp = -1;   // patch + control-point index under the crosshair
+int patchorient = 0;                       // box face under the crosshair (like entorient)
 int patchmoving = 0;                       // 0 idle, 1 first drag frame, 2 dragging
 
-// Pick the control point under the crosshair exactly like an entity marker: ray vs an
-// entselradius-sized box around each point, nearest hit wins. Sets patchhover/patchhovercp and
-// returns the hit distance (1e16 if none) so the editor can compare against world/entity hits.
+// the axis-aligned box that represents a control-point handle (identical to an entity marker box)
+static void cpbox(const vec &c, vec &eo, vec &es)
+{
+    eo = vec(c).sub(entselradius);
+    es = vec(entselradius*2);
+}
+
+// Pick the control point under the crosshair exactly like an entity marker: ray vs the handle box,
+// capturing which face was hit (mirrors rayent/entorient). Sets patchhover/patchhovercp/patchorient
+// and returns the hit distance (1e16 if none) so the editor can compare it against world/entity hits.
 float raypatchcp(const vec &o, const vec &ray)
 {
     patchhover = patchhovercp = -1;
     float best = 1e16f;
-    int orient = 0;
     loopv(patches)
     {
         bezpatch *p = patches[i];
         loopvj(p->ctrl)
         {
-            vec bo = vec(p->ctrl[j]).sub(entselradius), bs = vec(entselradius*2);
+            vec eo, es;
+            cpbox(p->ctrl[j], eo, es);
             float dist = 1e16f;
-            if(rayboxintersect(bo, bs, o, ray, dist, orient) && dist < best)
+            int orient = 0;
+            if(rayboxintersect(eo, es, o, ray, dist, orient) && dist < best)
             {
                 best = dist;
                 patchhover = i;
                 patchhovercp = j;
+                patchorient = orient;
             }
         }
     }
     return best;
 }
 
+// move the hovered control point within the plane of the grabbed box face -- the exact mechanism
+// entdrag() uses (d = the face dimension, slide within R[d]/C[d]).
 void patchdrag(const vec &ray)
 {
     if(!patches.inrange(patchhover)) { patchmoving = 0; return; }
     bezpatch *p = patches[patchhover];
     if(!p->ctrl.inrange(patchhovercp)) { patchmoving = 0; return; }
     vec &c = p->ctrl[patchhovercp];
-    // drag in the plane perpendicular to the camera's dominant axis (closest axis-aligned view plane)
-    int d = fabs(ray.x) >= fabs(ray.y) && fabs(ray.x) >= fabs(ray.z) ? 0 : (fabs(ray.y) >= fabs(ray.z) ? 1 : 2);
+    int d = dimension(patchorient), dc = dimcoord(patchorient);
+    vec eo, es;
+    cpbox(c, eo, es);
     static vec handle, dest;
-    if(!editmoveplane(c, ray, d, c[d], handle, dest, patchmoving==1)) return;
+    if(!editmoveplane(c, ray, d, eo[d] + (dc ? es[d] : 0), handle, dest, patchmoving==1)) return;
     c[R[d]] = dest[R[d]];
     c[C[d]] = dest[C[d]];
     p->dirty = true;
@@ -248,13 +263,20 @@ void renderpatchhandles()
             if(y+1 < p->rows) { gle::attrib(p->cp(x, y)); gle::attrib(p->cp(x, y+1)); }
         }
         xtraverts += gle::end();
-        // control-point markers, drawn like entity position markers (green box, red when hovered)
+        // control-point markers rendered exactly like an entity selection: green box, and on the
+        // hovered one a red highlight of the face you'd grab (see renderentselection()).
         loopvj(p->ctrl)
         {
-            bool hov = i==patchhover && j==patchhovercp;
-            vec eo = vec(p->ctrl[j]).sub(entselradius), es = vec(entselradius*2);
-            gle::colorub(hov ? 150 : 0, hov ? 0 : 40, 0);
+            vec eo, es;
+            cpbox(p->ctrl[j], eo, es);
+            gle::colorub(0, 40, 0);
             boxs3D(eo, es, 1);
+            if(i==patchhover && j==patchhovercp)
+            {
+                gle::colorub(150, 0, 0);
+                boxs(patchorient, eo, es);
+                boxs(patchorient, eo, es, clamp(0.015f*camera1->o.dist(eo)*tan(fovy*0.5f*RAD), 0.1f, 1.0f));
+            }
         }
     }
 }
