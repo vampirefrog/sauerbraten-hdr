@@ -20,10 +20,13 @@ struct bezpatch
     vector<vec> norms;       // normals
     vector<vec> tangents;    // surface tangent (d/du), orthonormalized vs normal -- for normal mapping
     vector<vec2> tcs;        // natural (arc-length) texture coords, world units
+    vector<vec2> lmtc;       // per-vertex lightmap coords (grid fraction 0..1)
     vector<ushort> tris;     // triangle indices into the per-vertex arrays
     bool dirty;
 
-    bezpatch() : cols(0), rows(0), vslot(0), tess(4), dirty(true) { setdims(3, 3); }
+    uint lmtex[3];           // baked 3-basis RNM HDR lightmap textures (0 = unbaked -> forward lighting)
+
+    bezpatch() : cols(0), rows(0), vslot(0), tess(4), dirty(true) { lmtex[0] = lmtex[1] = lmtex[2] = 0; setdims(3, 3); }
 
     vec &cp(int x, int y) { return ctrl[y*cols + x]; }
     const vec &cp(int x, int y) const { return ctrl[y*cols + x]; }
@@ -45,6 +48,10 @@ struct bezpatch
     void evalsubpatch(int iu, int iv, float u, float v, vec &pos, vec &du, vec &dv) const;
     void tessellate();
     void boundsphere(vec &center, float &radius) const;
+#ifndef STANDALONE
+    void uploadlm(uchar *rgbe0, uchar *rgbe1, uchar *rgbe2, int gw, int gh);   // baked RNM basis -> fp16 textures
+    void freelm();
+#endif
 };
 
 extern vector<bezpatch *> patches;

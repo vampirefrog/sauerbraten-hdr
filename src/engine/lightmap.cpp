@@ -1282,6 +1282,59 @@ void bakemapmodelprobes()
     }
 }
 
+// Bezier patches get baked 3-basis RNM HDR lightmaps (the patch's own per-vertex tangent frame, so the
+// normal map and lightmap stay consistent on the curved surface). Mirrors the probe bake's worker setup.
+extern int numpatches();
+extern bool getpatchgrid(int i, const vec *&verts, const vec *&norms, const vec *&tangents, int &gw, int &gh);
+extern void setpatchlm(int i, uchar *rgbe0, uchar *rgbe1, uchar *rgbe2, int gw, int gh);
+
+void bakepatchlights()
+{
+    int n = numpatches();
+    if(!n) return;
+    if(lightmapworkers.empty()) lightmapworkers.add(new lightmapworker);
+    lightmapworker *w = lightmapworkers[0];
+    resetshadowraycache(w->shadowraycache);
+    w->lights.setsize(0);
+    const vector<extentity *> &ents = entities::getents();
+    loopv(ents) if(ents[i]->type == ET_LIGHT) w->lights.add(ents[i]);
+
+    // HL2 radiosity-normal-map basis (tangent space: x=tangent, y=bitangent, z=normal)
+    static const vec hl2[3] = {
+        vec(-0.40824829f,  0.70710678f, 0.57735027f),
+        vec(-0.40824829f, -0.70710678f, 0.57735027f),
+        vec( 0.81649658f,  0.0f,        0.57735027f)
+    };
+    vec amb = hasskylight() ? vec(skylightcolor.x, skylightcolor.y, skylightcolor.z)
+                            : vec(ambientcolor.x, ambientcolor.y, ambientcolor.z);
+    bool dogi = gi && hdrlightmaps;
+
+    loopi(n)
+    {
+        const vec *verts, *norms, *tangents;
+        int gw, gh;
+        if(!getpatchgrid(i, verts, norms, tangents, gw, gh)) continue;
+        int np = gw*gh;
+        uchar *out[3] = { new uchar[np*4], new uchar[np*4], new uchar[np*4] };
+        loopj(np)
+        {
+            vec pos = verts[j], N = norms[j], T = tangents[j], B;
+            B.cross(N, T);
+            loopk(3)
+            {
+                vec wb = vec(T).mul(hl2[k].x).add(vec(B).mul(hl2[k].y)).add(vec(N).mul(hl2[k].z));
+                if(wb.iszero()) wb = N; else wb.normalize();
+                vec rad = gatherdirect(w, pos, wb).add(amb);
+                if(dogi) { vec g(0, 0, 0); calcgi(w, pos, wb, 0.5f, g, 1); rad.add(g); }
+                encodergbe(rad.mul(1.0f/255.0f), &out[k][j*4]);
+            }
+        }
+        setpatchlm(i, out[0], out[1], out[2], gw, gh);
+        loopk(3) delete[] out[k];
+        renderprogress(float(i+1)/n, "lighting bezier patches...");
+    }
+}
+
 VARR(blurlms, 0, 0, 2);
 VARR(blurskylight, 0, 0, 2);
 
@@ -2875,6 +2928,7 @@ void calclight(int *quality)
     initlights();
     // bake the ambient-cube probe grid only when opted in (genlightprobes(false) is a no-op if lightprobes is off)
     if(!calclight_canceled) { renderbackground("generating light probes..."); genlightprobes(false); bakemapmodelprobes(); }
+    if(!calclight_canceled) { renderbackground("lighting bezier patches..."); bakepatchlights(); }
     renderbackground("lighting done...");
     allchanged();
     if(calclight_canceled)

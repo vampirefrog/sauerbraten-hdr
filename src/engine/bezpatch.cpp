@@ -7,6 +7,9 @@ vector<bezpatch *> patches;
 
 void clearpatches()
 {
+#ifndef STANDALONE
+    loopv(patches) patches[i]->freelm();
+#endif
     patches.deletecontents();
 }
 
@@ -30,7 +33,7 @@ void bezpatch::evalsubpatch(int iu, int iv, float u, float v, vec &pos, vec &du,
 
 void bezpatch::tessellate()
 {
-    verts.setsize(0); norms.setsize(0); tangents.setsize(0); tcs.setsize(0); tris.setsize(0);
+    verts.setsize(0); norms.setsize(0); tangents.setsize(0); tcs.setsize(0); lmtc.setsize(0); tris.setsize(0);
     dirty = false;
     int nu = usub(), nv = vsub();
     if(nu < 1 || nv < 1 || tess < 1) return;
@@ -65,6 +68,7 @@ void bezpatch::tessellate()
         loopk(i) s += verts[j*stride + k+1].dist(verts[j*stride + k]);
         loopk(j) t += verts[(k+1)*stride + i].dist(verts[k*stride + i]);
         tcs[j*stride + i] = vec2(s, t);
+        lmtc.add(vec2(su ? float(i)/su : 0, sv ? float(j)/sv : 0));   // grid fraction for the baked lightmap
     }
 
     loopj(sv) loopi(su)
@@ -137,6 +141,49 @@ void loadworldpatches(stream *f)
 
 extern int currentedittex();   // octaedit.cpp: editor's current texture (declared locally, like entdrag)
 extern selinfo sel;            // current edit selection (world.cpp); used to place new patches
+extern void createtexture(int tnum, int w, int h, void *pixels, int clamp, int filter, GLenum component, GLenum subtarget, int pw, int ph, int pitch, bool resize, GLenum format, bool swizzle);
+
+void bezpatch::freelm()
+{
+    loopk(3) if(lmtex[k]) { glDeleteTextures(1, (GLuint *)&lmtex[k]); lmtex[k] = 0; }
+}
+
+// decode the 3 baked RGBE basis buffers to linear fp16 and upload as 3 lightmap textures (RNM)
+void bezpatch::uploadlm(uchar *rgbe0, uchar *rgbe1, uchar *rgbe2, int gw, int gh)
+{
+    uchar *srcs[3] = { rgbe0, rgbe1, rgbe2 };
+    float *fdata = new float[gw*gh*3];
+    loopk(3)
+    {
+        if(!lmtex[k]) { GLuint id = 0; glGenTextures(1, &id); lmtex[k] = id; }
+        loopi(gw*gh) { vec c = decodergbe(&srcs[k][i*4]); fdata[i*3] = c.x; fdata[i*3+1] = c.y; fdata[i*3+2] = c.z; }
+        createtexture(lmtex[k], gw, gh, fdata, 1, 1, GL_RGB16F, GL_TEXTURE_2D, gw, gh, 0, false, GL_RGB, false);
+    }
+    delete[] fdata;
+}
+
+// --- bake interface: raw-pointer accessors so the (fast-math) lightmap.cpp bake never touches the struct ---
+int numpatches() { return patches.length(); }
+
+bool getpatchgrid(int i, const vec *&verts, const vec *&norms, const vec *&tangents, int &gw, int &gh)
+{
+    if(!patches.inrange(i)) return false;
+    bezpatch *p = patches[i];
+    if(p->dirty) p->tessellate();
+    int nu = p->usub(), nv = p->vsub();
+    gw = nu*p->tess + 1;
+    gh = nv*p->tess + 1;
+    if(p->verts.length() != gw*gh) return false;
+    verts = p->verts.getbuf();
+    norms = p->norms.getbuf();
+    tangents = p->tangents.getbuf();
+    return true;
+}
+
+void setpatchlm(int i, uchar *rgbe0, uchar *rgbe1, uchar *rgbe2, int gw, int gh)
+{
+    if(patches.inrange(i)) patches[i]->uploadlm(rgbe0, rgbe1, rgbe2, gw, gh);
+}
 
 // edit state (defined up here so the creation commands can reference them)
 int patchhover = -1, patchhovercp = -1;   // patch + control-point index under the crosshair
@@ -223,9 +270,8 @@ void renderpatches()
 
     glDisable(GL_CULL_FACE);     // patches are two-sided until per-face culling settles in a later phase
     glDisable(GL_BLEND);
-    SETSHADER(bezpatch);
 
-    // forward sun + ambient lighting (shared by all patches this frame), HDR-scaled into the fp16 buffer
+    // forward sun + ambient (used by unbaked patches; baked patches sample their RNM lightmaps instead)
     GLOBALPARAM(psundir, sunlightdir);
     GLOBALPARAMF(psun, sunlightcolor.x/255.0f*sunlightscale, sunlightcolor.y/255.0f*sunlightscale, sunlightcolor.z/255.0f*sunlightscale);
     GLOBALPARAMF(pambient, max(max(ambientcolor.x, skylightcolor.x)/255.0f, 0.15f),
@@ -236,6 +282,7 @@ void renderpatches()
     gle::defnormal();
     gle::deftangent(3);
     gle::deftexcoord0();
+    gle::deftexcoord1();
 
     loopv(patches)
     {
@@ -245,9 +292,12 @@ void renderpatches()
         Slot &s = *vs.slot;
         Texture *diffuse = s.sts.inrange(0) ? s.sts[0].t : notexture;
         Texture *norm = slottex(s, TEX_NORMAL), *glow = slottex(s, TEX_GLOW);
+        bool baked = p->lmtex[0] != 0;
+        if(baked) SETSHADER(bezpatchlm); else SETSHADER(bezpatch);
         glActiveTexture_(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, diffuse->id);
         glActiveTexture_(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, (norm ? norm : notexture)->id);
         glActiveTexture_(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, (glow ? glow : notexture)->id);
+        if(baked) loopk(3) { glActiveTexture_(GL_TEXTURE3+k); glBindTexture(GL_TEXTURE_2D, p->lmtex[k]); }
         glActiveTexture_(GL_TEXTURE0);
         GLOBALPARAMF(pcolor, vs.colorscale.x, vs.colorscale.y, vs.colorscale.z, 1.0f);
         GLOBALPARAMF(pbump, norm ? 1.0f : 0.0f);
@@ -261,6 +311,7 @@ void renderpatches()
             gle::attrib(p->norms[idx]);
             gle::attrib(p->tangents[idx]);
             gle::attrib(vec2(p->tcs[idx]).mul(inv));
+            gle::attrib(p->lmtc[idx]);
         }
         xtraverts += gle::end();
     }
