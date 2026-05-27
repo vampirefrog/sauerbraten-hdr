@@ -2,6 +2,7 @@
 // runs dedicated or as client coroutine
 
 #include "engine.h"
+#include <signal.h>
 
 #define LOGSTRLEN 512
 
@@ -1140,11 +1141,28 @@ bool serveroption(char *opt)
 vector<const char *> gameargs;
 
 #ifdef STANDALONE
+static void shutdownserver()
+{
+    static bool saved = false;
+    if(saved) return;
+    saved = true;
+    server::shutdownsave();
+}
+
+static void serversignal(int sig)
+{
+    shutdownserver();
+    exit(EXIT_SUCCESS);
+}
+
 int main(int argc, char **argv)
-{   
+{
     setlogfile(NULL);
     if(enet_initialize()<0) fatal("Unable to initialise network module");
     atexit(enet_deinitialize);
+    atexit(shutdownserver);
+    signal(SIGINT, serversignal);
+    signal(SIGTERM, serversignal);
     enet_time_set(0);
     for(int i = 1; i<argc; i++) if(argv[i][0]!='-' || !serveroption(argv[i])) gameargs.add(argv[i]);
     game::parseoptions(gameargs);

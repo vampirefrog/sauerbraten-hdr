@@ -469,7 +469,9 @@ struct ImageData
         setdata(data, nw, nh, nbpp); 
     }
 
+#ifndef STANDALONE
     ImageData(SDL_Surface *s) { wrap(s); }
+#endif
     ~ImageData() { cleanup(); }
 
     void setdata(uchar *ndata, int nw, int nh, int nbpp, int nlevels = 1, int nalign = 0, GLenum ncompressed = GL_FALSE)
@@ -527,6 +529,7 @@ struct ImageData
         d.disown();
     }
 
+#ifndef STANDALONE
     void wrap(SDL_Surface *s)
     {
         setdata((uchar *)s->pixels, s->w, s->h, s->format->BytesPerPixel);
@@ -534,6 +537,7 @@ struct ImageData
         owner = s;
         freefunc = (void (*)(void *))SDL_FreeSurface;
     }
+#endif
 };
 
 // management of texture slots

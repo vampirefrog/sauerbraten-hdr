@@ -23,3 +23,6 @@ src/master
 /restore.cfg
 /servers.cfg
 /init.cfg
+
+# local dedicated-server test home dir
+/srvhome/

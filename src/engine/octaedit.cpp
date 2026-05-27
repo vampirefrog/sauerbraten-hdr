@@ -4,6 +4,7 @@ extern int outline;
 
 bool boxoutline = false;
 
+#ifndef STANDALONE
 void boxs(int orient, vec o, const vec &s, float size)
 {
     int d = dimension(orient), dc = dimcoord(orient);
@@ -89,6 +90,7 @@ void boxsgrid(int orient, vec o, vec s, int g)
     }
     xtraverts += gle::end();
 }
+#endif
 
 selinfo sel, lastsel, savedsel;
 
@@ -179,8 +181,10 @@ void toggleedit(bool force)
     stoppaintblendmap();
     keyrepeat(editmode);
     editing = editmode;
+#ifndef STANDALONE
     extern int fullbright;
     if(fullbright) { initlights(); lightents(); }
+#endif
     if(!force) game::edittoggled(editmode);
 }
 
@@ -372,6 +376,7 @@ VAR(passthroughent, 0, 1, 1);
 VARF(passthrough, 0, 0, 1, { passthroughsel = passthrough; entcancel(); });
 VARP(selectionoffset, 0, 1, 1);
 
+#ifndef STANDALONE
 void rendereditcursor()
 {
     int d   = dimension(sel.orient),
@@ -571,6 +576,7 @@ void rendereditcursor()
 
     glDisable(GL_BLEND);
 }
+#endif
 
 void tryedit()
 {
@@ -1215,8 +1221,10 @@ struct prefab : editinfo
 
     void cleanup()
     {
+#ifndef STANDALONE
         if(ebo) { glDeleteBuffers_(1, &ebo); ebo = 0; }
         if(vbo) { glDeleteBuffers_(1, &vbo); vbo = 0; }
+#endif
         numtris = numverts = 0;
     }
 };
@@ -1356,6 +1364,7 @@ struct prefabmesh
 
         p.cleanup();
 
+#ifndef STANDALONE
         loopv(verts) verts[i].norm.flip();
         if(!p.vbo) glGenBuffers_(1, &p.vbo);
         gle::bindvbo(p.vbo);
@@ -1368,6 +1377,7 @@ struct prefabmesh
         glBufferData_(GL_ELEMENT_ARRAY_BUFFER, tris.length()*sizeof(ushort), tris.getbuf(), GL_STATIC_DRAW);
         gle::clearebo();
         p.numtris = tris.length()/3;
+#endif
     }
 
 };
@@ -1449,6 +1459,7 @@ void genprefabmesh(prefab &p)
 
 extern int outlinecolour;
 
+#ifndef STANDALONE
 static void renderprefab(prefab &p, const vec &o, float yaw, float pitch, float roll, float size, const vec &color)
 {
     if(!p.numtris)
@@ -1520,6 +1531,7 @@ void previewprefab(const char *name, const vec &color)
         renderprefab(*p, o, yaw, 0, 0, 1, color);
     }
 }
+#endif
 
 void mpcopy(editinfo *&e, selinfo &sel, bool local)
 {
@@ -2913,6 +2925,7 @@ bool cleartexgui()
 }
 ICOMMAND(cleartexgui, "", (), intret(cleartexgui() ? 1 : 0));
 
+#ifndef STANDALONE
 void rendertexturepanel(int w, int h)
 {
     if((texpaneltimer -= curtime)>0 && editmode)
@@ -3001,3 +3014,4 @@ void rendertexturepanel(int w, int h)
         hudshader->set();
     }
 }
+#endif

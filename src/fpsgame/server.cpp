@@ -777,10 +777,128 @@ namespace server
         return false;
     }
 
+    // server-side map persistence: keep the in-memory coop-edit map (mapdata) backed by a
+    // single file on disk (servermappath, default "map.ogz" in the home dir), so it
+    // survives restarts and can be served to joining clients without a manual /getmap.
+    SVARP(servermappath, "map.ogz");         // the one stored map file (relative to home dir)
+    VARP(persistmaps, 0, 1, 1);              // master switch for the whole feature
+    VARP(mapsaveinterval, 0, 180, 3600);     // seconds between periodic autosaves (0 = off)
+
+    string mapdataname = "";                 // name of the map currently held in mapdata
+    uint mapdatacrc = 0;                      // crc of mapdata's decompressed contents (0 = unknown)
+    int lastmapsavetime = 0;                 // totalmillis of last successful periodic save
+    bool mapdatadirty = false;               // mapdata changed since last disk save
+    string pendingmap = "";                  // map restored at startup, applied on first connect
+    int pendingmode = 1;                     // gamemode for the restored map (1 = coop edit)
+    bool havependingmap = false;
+
+    void updatemapdatacrc();
+
+    // map name announced to clients for the restored map = servermappath basename w/o .ogz
+    void servermapbasename(string &dst)
+    {
+        const char *base = servermappath;
+        for(const char *s = servermappath; *s; s++) if(*s == '/' || *s == '\\') base = s+1;
+        copystring(dst, base);
+        char *dot = strrchr(dst, '.');
+        if(dot && !strcasecmp(dot, ".ogz")) *dot = '\0';
+        if(!dst[0]) copystring(dst, "map");
+    }
+
+    bool saveservermap()
+    {
+        if(!mapdata || !servermappath[0]) return false;
+        // openrawfile resolves the home dir and creates parent dirs itself; do NOT
+        // pre-resolve with findfile or the path gets the home dir prepended twice.
+        stream *f = openrawfile(servermappath, "wb");
+        if(!f) return false;
+        mapdata->seek(0, SEEK_SET);
+        uchar buf[4096];
+        bool ok = true;
+        for(;;)
+        {
+            size_t n = mapdata->read(buf, sizeof(buf));
+            if(!n) break;
+            if(f->write(buf, n) != n) { ok = false; break; }
+        }
+        delete f;
+        if(!ok) { const char *p = findfile(servermappath, "rb"); if(p) remove(p); }
+        return ok;
+    }
+
+    bool loadservermap()
+    {
+        if(!servermappath[0]) return false;
+        stream *f = openrawfile(servermappath, "rb");
+        if(!f) return false;
+        stream::offset len = f->size();
+        if(len <= 0 || len > 16*1024*1024) { delete f; return false; }
+        stream *tmp = opentempfile("mapdata", "w+b");
+        if(!tmp) { delete f; return false; }
+        uchar buf[4096];
+        bool ok = true;
+        for(;;)
+        {
+            size_t n = f->read(buf, sizeof(buf));
+            if(!n) break;
+            if(tmp->write(buf, n) != n) { ok = false; break; }
+        }
+        delete f;
+        if(!ok) { delete tmp; return false; }
+        if(mapdata) DELETEP(mapdata);
+        mapdata = tmp;
+        servermapbasename(mapdataname);
+        mapdatadirty = false;
+        updatemapdatacrc();
+        return true;
+    }
+
+    // crc of the decompressed .ogz contents, matching what clients report via N_MAPCRC
+    // (gz streams accumulate the crc of the uncompressed data). Used to decide whether a
+    // joining client already has the server's copy. Read from the on-disk file.
+    void updatemapdatacrc()
+    {
+        mapdatacrc = 0;
+        if(!servermappath[0]) return;
+        stream *f = opengzfile(servermappath, "rb");
+        if(!f) return;
+        uchar buf[4096];
+        while(f->read(buf, sizeof(buf)) > 0);
+        mapdatacrc = f->getcrc();
+        delete f;
+    }
+
+    bool persistcurrentmap()
+    {
+        if(!persistmaps || !mapdata) return false;
+        if(!saveservermap()) return false;
+        updatemapdatacrc();
+        mapdatadirty = false;
+        lastmapsavetime = totalmillis;
+        logoutf("saved server map to \"%s\"", servermappath);
+        return true;
+    }
+
+    void loadstartupmap()
+    {
+        if(!persistmaps) return;
+        if(!loadservermap()) return; // sets mapdataname (basename) + mapdatacrc
+        copystring(pendingmap, mapdataname);
+        pendingmode = 1; // coop edit
+        havependingmap = true;
+        logoutf("restored server map from \"%s\" as \"%s\"", servermappath, mapdataname);
+    }
+
+    void shutdownsave()
+    {
+        if(persistmaps) persistcurrentmap();
+    }
+
     void serverinit()
     {
         smapname[0] = '\0';
         resetitems();
+        loadstartupmap();
     }
 
     int numclients(int exclude = -1, bool nospec = true, bool noai = true, bool priv = false)
@@ -2047,6 +2165,7 @@ namespace server
         nextexceeded = 0;
         copystring(smapname, s);
         loaditems();
+
         scores.shrink(0);
         shouldcheckteamkills = false;
         teamkills.shrink(0);
@@ -2531,6 +2650,10 @@ namespace server
         }
 
         shouldstep = clients.length() > 0;
+
+        if(persistmaps && mapsaveinterval > 0 && mapdatadirty && mapdata && mapdataname[0]
+           && totalmillis - lastmapsavetime >= mapsaveinterval*1000)
+            persistcurrentmap();
     }
 
     void forcespectator(clientinfo *ci)
@@ -2681,7 +2804,11 @@ namespace server
             sendf(-1, 1, "ri2", N_CDIS, n);
             clients.removeobj(ci);
             aiman::removeai(ci);
-            if(!numclients(-1, false, true)) noclients(); // bans clear when server empties
+            if(!numclients(-1, false, true))
+            {
+                if(persistmaps) persistcurrentmap(); // save before the server goes idle
+                noclients(); // bans clear when server empties
+            }
             if(ci->local) checkpausegame();
         }
         else connects.removeobj(ci);
@@ -2902,6 +3029,12 @@ namespace server
         mapdata = opentempfile("mapdata", "w+b");
         if(!mapdata) { sendf(sender, 1, "ris", N_SERVMSG, "failed to open temporary file for map"); return; }
         mapdata->write(data, len);
+        copystring(mapdataname, smapname);
+        mapdatadirty = true;
+        mapdatacrc = 0;
+        // persist right away so the stored copy (and its crc, used for auto-send) is current.
+        // single stored map: not gated on a map name (which is empty after /newmap).
+        if(persistmaps) persistcurrentmap();
         sendservmsgf("[%s sent a map to server, \"/getmap\" to receive it]", colorname(ci));
     }
 
@@ -2924,7 +3057,12 @@ namespace server
     {
         if(m_demo) enddemoplayback();
 
-        if(!hasmap(ci)) rotatemap(false);
+        if(havependingmap)
+        {
+            havependingmap = false;
+            changemap(pendingmap, pendingmode);
+        }
+        else if(!hasmap(ci)) rotatemap(false);
 
         shouldstep = true;
 
@@ -3140,6 +3278,14 @@ namespace server
                 getstring(text, p);
                 int crc = getint(p);
                 if(!ci) break;
+                // auto-send the server's single stored map to a joining/mismatched client
+                // so they don't have to /getmap; whenever we have a stored map (valid crc)
+                // and the client's loaded map differs from it. Name-independent.
+                if(m_edit && mapdata && mapdatacrc && !ci->getmap && (uint)crc != mapdatacrc)
+                {
+                    if((ci->getmap = sendfile(ci->clientnum, 2, mapdata, "ri", N_SENDMAP)))
+                        ci->getmap->freeCallback = freegetmap;
+                }
                 if(strcmp(text, smapname))
                 {
                     if(ci->clientmap[0])

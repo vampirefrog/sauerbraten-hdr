@@ -4,13 +4,36 @@
 #include "cube.h"
 #include "world.h"
 
-#ifndef STANDALONE
+#ifdef STANDALONE
+// The dedicated server compiles the octree/edit engine so it can maintain its own copy
+// of the map. It needs the data-structure headers but no rendering; GL types are stubbed.
+#include "glstub.h"
+#include "octa.h"
+#include "texture.h"
+// cube-surface helpers normally declared in lightmap.h (a client-only header); the server
+// gets render-independent re-implementations from serverengine.cpp.
+extern void brightencube(cube &c);
+extern void setsurfaces(cube &c, const surfaceinfo *surfs, const vertinfo *verts, int numverts);
+extern void setsurface(cube &c, int orient, const surfaceinfo &surf, const vertinfo *verts, int numverts);
+// lightmap functions the octree/world code calls; no-op on the server (it uses the
+// no-lightmaps path, like client /sendmap), implemented in serverengine.cpp.
+extern void initlights();
+extern void clearlightcache(int id = -1);
+extern void resetlightmaps(bool fullclean = true);
+#endif
 
+#ifndef STANDALONE
 #include "octa.h"
 #include "lightmap.h"
 #include "bih.h"
 #include "texture.h"
 #include "model.h"
+#endif
+
+// Declarations below are shared between the client and the dedicated server. The server
+// (STANDALONE) compiles the octree/edit engine, so it needs the octa/world/octaedit
+// prototypes here. The few declarations that reference client-only types (SDL, models)
+// are individually guarded with #ifndef STANDALONE.
 
 extern dynent *player;
 extern physent *camera1;                // special ent that acts as camera, same object as player1 in FPS mode
@@ -27,7 +50,9 @@ extern const uchar fvmasks[64];
 extern const uchar faceedgesidx[6][4];
 extern bool inbetweenframes, renderedframe;
 
+#ifndef STANDALONE
 extern SDL_Window *screen;
+#endif
 extern int screenw, screenh;
 extern int zpass;
 
@@ -523,12 +548,14 @@ extern void preloadusedmapmodels(bool msg = false, bool bih = false);
 
 static inline model *loadmapmodel(int n)
 {
+#ifndef STANDALONE
     extern vector<mapmodelinfo> mapmodels;
     if(mapmodels.inrange(n))
     {
         model *m = mapmodels[n].m;
         return m ? m : loadmodel(NULL, n);
     }
+#endif
     return NULL;
 }
 
@@ -628,8 +655,6 @@ namespace recorder
     extern void capture(bool overlay = true);
     extern void cleanup();
 }
-
-#endif
 
 #endif
 

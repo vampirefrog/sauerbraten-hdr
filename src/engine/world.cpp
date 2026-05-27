@@ -12,14 +12,18 @@ VAR(entselradius, 0, 2, 10);
 
 static inline void mmboundbox(const entity &e, model *m, vec &center, vec &radius)
 {
+#ifndef STANDALONE
     m->boundbox(center, radius);
     rotatebb(center, radius, e.attr1);
+#endif
 }
 
 static inline void mmcollisionbox(const entity &e, model *m, vec &center, vec &radius)
 {
+#ifndef STANDALONE
     m->collisionbox(center, radius);
     rotatebb(center, radius, e.attr1);
+#endif
 }
 
 bool getentboundingbox(const extentity &e, ivec &o, ivec &r)
@@ -172,9 +176,11 @@ static bool modifyoctaent(int flags, int id, extentity &e)
     e.flags ^= EF_OCTA;
     if(e.flags&EF_OCTA) ++numoctaents;
     else --numoctaents;
+#ifndef STANDALONE
     if(e.type == ET_LIGHT) clearlightcache(id);
     else if(e.type == ET_PARTICLES) clearparticleemitters();
     else if(flags&MODOE_LIGHTENT) lightent(e);
+#endif
     return true;
 }
 
@@ -484,6 +490,7 @@ void entselectionbox(const entity &e, vec &eo, vec &es)
 {
     model *m = NULL;
     const char *mname = entities::entmodel(e);
+#ifndef STANDALONE
     if(mname && (m = loadmodel(mname)))
     {
         m->collisionbox(eo, es);
@@ -500,6 +507,7 @@ void entselectionbox(const entity &e, vec &eo, vec &es)
         eo.add(e.o);
     }
     else
+#endif
     {
         es = vec(entselradius);
         eo = e.o;
@@ -550,6 +558,7 @@ void entdrag(const vec &ray)
 
 VAR(showentradius, 0, 1, 1);
 
+#ifndef STANDALONE
 void renderentring(const extentity &e, float radius, int axis)
 {
     if(radius <= 0) return;
@@ -752,6 +761,7 @@ void renderentselection(const vec &o, const vec &ray, bool entmoving)
         if(enthover>=0) entfocus(enthover, renderentradius(e, true));
     }
 }
+#endif
 
 bool enttoggle(int id)
 {
