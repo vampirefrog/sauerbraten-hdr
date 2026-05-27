@@ -263,21 +263,20 @@ void renderpatchhandles()
             if(y+1 < p->rows) { gle::attrib(p->cp(x, y)); gle::attrib(p->cp(x, y+1)); }
         }
         xtraverts += gle::end();
-        // control-point markers rendered exactly like an entity selection: green box, and on the
-        // hovered one a red highlight of the face you'd grab (see renderentselection()).
-        loopvj(p->ctrl)
-        {
-            vec eo, es;
-            cpbox(p->ctrl[j], eo, es);
-            gle::colorub(0, 40, 0);
-            boxs3D(eo, es, 1);
-            if(i==patchhover && j==patchhovercp)
-            {
-                gle::colorub(150, 0, 0);
-                boxs(patchorient, eo, es);
-                boxs(patchorient, eo, es, clamp(0.015f*camera1->o.dist(eo)*tan(fovy*0.5f*RAD), 0.1f, 1.0f));
-            }
-        }
+    }
+
+    // control-point markers themselves are the blue PART_EDIT sparkles emitted in renderparticles.cpp
+    // (same as entities). Only the hovered one gets the selection box + red grab-face, exactly like
+    // renderentselection() does for enthover.
+    if(patches.inrange(patchhover) && patches[patchhover]->ctrl.inrange(patchhovercp))
+    {
+        vec eo, es;
+        cpbox(patches[patchhover]->ctrl[patchhovercp], eo, es);
+        gle::colorub(0, 40, 0);
+        boxs3D(eo, es, 1);
+        gle::colorub(150, 0, 0);
+        boxs(patchorient, eo, es);
+        boxs(patchorient, eo, es, clamp(0.015f*camera1->o.dist(eo)*tan(fovy*0.5f*RAD), 0.1f, 1.0f));
     }
 }
 

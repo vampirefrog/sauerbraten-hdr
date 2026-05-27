@@ -1549,5 +1549,12 @@ void updateparticles()
             particle_textcopy(e.o, entname(e), PART_TEXT, 1, 0x1EC850, 2.0f);
             regular_particle_splash(PART_EDIT, 2, 40, e.o, 0x3232FF, 0.32f*particlesize/100.0f);
         }
+        // bezier patch control points get the same edit-mode marker sparkle as entities
+        loopv(patches)
+        {
+            bezpatch *p = patches[i];
+            loopvj(p->ctrl)
+                regular_particle_splash(PART_EDIT, 2, 40, p->ctrl[j], 0x3232FF, 0.32f*particlesize/100.0f);
+        }
     }
 }
