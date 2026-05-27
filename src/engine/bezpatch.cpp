@@ -251,6 +251,36 @@ static inline bool raytri(const vec &o, const vec &dir, const vec &v0, const vec
     return t > 1e-3f;
 }
 
+// --- collision: players/projectiles collide with the tessellated patch triangles ---
+VARP(patchclip, 0, 1, 1);   // 0 disables patch collision
+extern bool collidetriangle(physent *d, const vec &dir, float cutoff, const vec &a, const vec &b, const vec &c);
+
+bool patchcollide(physent *d, const vec &dir, float cutoff)
+{
+    if(!patchclip || patches.empty()) return false;
+    vec pmin(d->o.x - d->radius, d->o.y - d->radius, d->o.z - d->eyeheight);
+    vec pmax(d->o.x + d->radius, d->o.y + d->radius, d->o.z + d->aboveeye);
+    loopv(patches)
+    {
+        bezpatch *p = patches[i];
+        if(p->dirty) p->tessellate();
+        if(p->tris.empty()) continue;
+        vec bc; float br;
+        p->boundsphere(bc, br);
+        if(fabs(bc.x - d->o.x) > br + d->radius || fabs(bc.y - d->o.y) > br + d->radius ||
+           bc.z + br < pmin.z || bc.z - br > pmax.z) continue;
+        for(int j = 0; j+2 < p->tris.length(); j += 3)
+        {
+            const vec &a = p->verts[p->tris[j]], &b = p->verts[p->tris[j+1]], &c = p->verts[p->tris[j+2]];
+            if(min(a.x, min(b.x, c.x)) > pmax.x || max(a.x, max(b.x, c.x)) < pmin.x ||
+               min(a.y, min(b.y, c.y)) > pmax.y || max(a.y, max(b.y, c.y)) < pmin.y ||
+               min(a.z, min(b.z, c.z)) > pmax.z || max(a.z, max(b.z, c.z)) < pmin.z) continue;
+            if(collidetriangle(d, dir, cutoff, a, b, c)) return true;
+        }
+    }
+    return false;
+}
+
 // distance to the nearest patch triangle hit by the ray (o + dir*t, dir unit), else radius
 float patchshadowdist(const vec &o, const vec &dir, float radius)
 {

@@ -1009,6 +1009,34 @@ static inline bool cubecollide(physent *d, const vec &dir, float cutoff, const c
     }
 }
 
+// collide a physent against one bezier-patch triangle (raw verts, so bezpatch.cpp -- which owns the patch
+// data -- can drive this without physics.cpp touching the patch struct). Sets collidewall to the face normal.
+template<class E>
+static bool trianglecollide(physent *d, const vec &dir, const vec &a, const vec &b, const vec &c)
+{
+    vec n;
+    n.cross(vec(b).sub(a), vec(c).sub(a));
+    if(n.iszero()) return false;
+    n.normalize();
+    mpr::Triangle tri(a, b, c, 4.0f);
+    E entvol(d);
+    if(!mpr::collide(tri, entvol)) return false;
+    if(n.dot(vec(d->o).sub(tri.center())) < 0) n.neg();   // orient the wall normal toward the player
+    collidewall = n;
+    return true;
+}
+
+bool collidetriangle(physent *d, const vec &dir, float cutoff, const vec &a, const vec &b, const vec &c)
+{
+    switch(d->collidetype)
+    {
+        case COLLIDE_OBB: return trianglecollide<mpr::EntOBB>(d, dir, a, b, c);
+        case COLLIDE_ELLIPSE:
+        case COLLIDE_ELLIPSE_PRECISE: return trianglecollide<mpr::EntCapsule>(d, dir, a, b, c);
+        default: return false;
+    }
+}
+
 static inline bool octacollide(physent *d, const vec &dir, float cutoff, const ivec &bo, const ivec &bs, const cube *c, const ivec &cor, int size) // collide with octants
 {
     loopoctabox(cor, size, bo, bs)
@@ -1072,7 +1100,8 @@ bool collide(physent *d, const vec &dir, float cutoff, bool playercol, bool insi
     ivec bo(int(d->o.x-d->radius), int(d->o.y-d->radius), int(d->o.z-d->eyeheight)),
          bs(int(d->o.x+d->radius), int(d->o.y+d->radius), int(d->o.z+d->aboveeye));
     bs.add(1);  // guard space for rounding errors
-    return octacollide(d, dir, cutoff, bo, bs) || (playercol && plcollide(d, dir, insideplayercol));
+    extern bool patchcollide(physent *d, const vec &dir, float cutoff);
+    return octacollide(d, dir, cutoff, bo, bs) || patchcollide(d, dir, cutoff) || (playercol && plcollide(d, dir, insideplayercol));
 }
 
 void recalcdir(physent *d, const vec &oldvel, vec &dir)

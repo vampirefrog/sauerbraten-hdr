@@ -44,6 +44,32 @@ namespace mpr
         }
     };
 
+    // a triangle given a small thickness (extruded along its normal) so MPR has a non-degenerate volume;
+    // used for bezier-patch collision
+    struct Triangle
+    {
+        vec v[6];
+
+        Triangle(const vec &a, const vec &b, const vec &c, float thickness)
+        {
+            vec n;
+            n.cross(vec(b).sub(a), vec(c).sub(a));
+            n = n.iszero() ? vec(0, 0, thickness) : n.normalize().mul(thickness);
+            v[0] = a; v[1] = b; v[2] = c;
+            v[3] = vec(a).sub(n); v[4] = vec(b).sub(n); v[5] = vec(c).sub(n);
+        }
+
+        vec center() const { vec c(0, 0, 0); loopi(6) c.add(v[i]); return c.div(6); }
+
+        vec supportpoint(const vec &n) const
+        {
+            int best = 0;
+            float bestd = n.dot(v[0]);
+            loopi(6) { float d = n.dot(v[i]); if(d > bestd) { bestd = d; best = i; } }
+            return v[best];
+        }
+    };
+
     struct Ent
     {
         physent *ent;
