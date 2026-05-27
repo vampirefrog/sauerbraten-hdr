@@ -1318,8 +1318,9 @@ void bakepatchlights()
         uchar *out[3] = { new uchar[np*4], new uchar[np*4], new uchar[np*4] };
         loopj(np)
         {
-            vec pos = verts[j], N = norms[j], T = tangents[j], B;
+            vec N = norms[j], T = tangents[j], B;
             B.cross(N, T);
+            vec pos = vec(verts[j]).add(vec(N).mul(0.5f));   // lift off the surface to avoid self-shadow acne
             // directional radiance at the true normal (the diffuse reference) and at each HL2 basis dir
             vec cdir = gatherdirect(w, pos, N);
             if(dogi) { vec g(0, 0, 0); calcgi(w, pos, N, 0.5f, g, 1); cdir.add(g); }
@@ -2922,6 +2923,11 @@ void calclight(int *quality)
     Uint32 start = SDL_GetTicks();
     calcnormals(lerptjoints > 0);
     setupgibake();
+    // bezier patches occlude light for the whole bake (world surfaces + other patches)
+    extern void tessellateallpatches();
+    extern bool patchcastshadows;
+    tessellateallpatches();
+    patchcastshadows = true;
     show_calclight_progress();
     setupthreads(numthreads);
     generatelightmaps(worldroot, ivec(0, 0, 0), worldsize >> 1);
@@ -2942,6 +2948,7 @@ void calclight(int *quality)
     // bake the ambient-cube probe grid only when opted in (genlightprobes(false) is a no-op if lightprobes is off)
     if(!calclight_canceled) { renderbackground("generating light probes..."); genlightprobes(false); bakemapmodelprobes(); }
     if(!calclight_canceled) { renderbackground("lighting bezier patches..."); bakepatchlights(); }
+    patchcastshadows = false;
     renderbackground("lighting done...");
     allchanged();
     if(calclight_canceled)

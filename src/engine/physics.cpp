@@ -307,9 +307,16 @@ static inline bool skyfaceexposed(const cube &c, int side, const ivec &lo, int s
     return visibleface(c, side, lo, sz);
 }
 
+// bezier patches occlude light only during the lightmap bake (patchcastshadows is set just for calclight),
+// so runtime shadow rays pay nothing. Clamping the radius to the nearest patch hit makes the octree walk
+// report occlusion at that distance if nothing solid blocks sooner.
+extern bool patchcastshadows;
+extern float patchshadowdist(const vec &o, const vec &dir, float radius);
+
 // optimized version for lightmap shadowing... every cycle here counts!!!
 float shadowray(const vec &o, const vec &ray, float radius, int mode, extentity *t)
 {
+    if(patchcastshadows) radius = min(radius, patchshadowdist(o, ray, radius));
     INITRAYCUBE;
     CHECKINSIDEWORLD;
 
@@ -382,6 +389,7 @@ void resetshadowraycache(ShadowRayCache *cache)
 
 float shadowray(ShadowRayCache *cache, const vec &o, const vec &ray, float radius, int mode, extentity *t)
 {
+    if(patchcastshadows) radius = min(radius, patchshadowdist(o, ray, radius));
     INITRAYCUBE;
     CHECKINSIDEWORLD;
 

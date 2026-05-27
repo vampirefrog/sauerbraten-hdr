@@ -224,6 +224,57 @@ void setpatchlm(int i, uchar *rgbe0, uchar *rgbe1, uchar *rgbe2, int gw, int gh)
     if(patches.inrange(i)) patches[i]->uploadlm(rgbe0, rgbe1, rgbe2, gw, gh);
 }
 
+void tessellateallpatches()   // ensure every patch mesh is current before a bake reads it
+{
+    loopv(patches) if(patches[i]->dirty) patches[i]->tessellate();
+}
+
+// patches occlude light during the lightmap bake (set only while calclight runs, so runtime shadow
+// rays skip this entirely). Read-only over the (already tessellated) patch meshes -> bake-thread safe.
+bool patchcastshadows = false;
+
+static inline bool raytri(const vec &o, const vec &dir, const vec &v0, const vec &v1, const vec &v2, float &t)
+{
+    vec e1 = vec(v1).sub(v0), e2 = vec(v2).sub(v0), p;
+    p.cross(dir, e2);
+    float det = e1.dot(p);
+    if(det > -1e-6f && det < 1e-6f) return false;
+    float inv = 1.0f/det;
+    vec tv = vec(o).sub(v0);
+    float u = tv.dot(p)*inv;
+    if(u < 0 || u > 1) return false;
+    vec q;
+    q.cross(tv, e1);
+    float vv = dir.dot(q)*inv;
+    if(vv < 0 || u+vv > 1) return false;
+    t = e2.dot(q)*inv;
+    return t > 1e-3f;
+}
+
+// distance to the nearest patch triangle hit by the ray (o + dir*t, dir unit), else radius
+float patchshadowdist(const vec &o, const vec &dir, float radius)
+{
+    float best = radius;
+    loopv(patches)
+    {
+        bezpatch *p = patches[i];
+        if(p->dirty || p->tris.empty()) continue;
+        vec c; float r;
+        p->boundsphere(c, r);
+        // ray-vs-bounding-sphere reject
+        vec oc = vec(c).sub(o);
+        float proj = clamp(oc.dot(dir), 0.0f, best);
+        if(vec(dir).mul(proj).add(o).squaredist(c) > r*r) continue;
+        for(int j = 0; j+2 < p->tris.length(); j += 3)
+        {
+            float t;
+            if(raytri(o, dir, p->verts[p->tris[j]], p->verts[p->tris[j+1]], p->verts[p->tris[j+2]], t) && t < best)
+                best = t;
+        }
+    }
+    return best;
+}
+
 // edit state (defined up here so the creation commands can reference them)
 int patchhover = -1, patchhovercp = -1;   // patch + control-point index under the crosshair
 int patchorient = 0;                       // box face under the crosshair (like entorient)
