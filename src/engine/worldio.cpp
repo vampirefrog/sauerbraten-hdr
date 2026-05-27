@@ -1299,7 +1299,7 @@ bool load_world(const char *mname, const char *cname)        // still supports a
 
     // bezier patches follow the octree (version>=35); read on both client and server.
     clearpatches();
-    if(hdr.version >= 35 && !failed) loadworldpatches(f);
+    if(hdr.version >= 35 && !failed) loadworldpatches(f, hdr.version);
 
 #ifndef STANDALONE
     // lightmaps / pvs / light probes / blendmap follow the octree. The server never has

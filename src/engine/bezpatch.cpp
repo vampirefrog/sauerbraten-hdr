@@ -31,6 +31,17 @@ void bezpatch::evalsubpatch(int iu, int iv, float u, float v, vec &pos, vec &du,
     }
 }
 
+// interpolate the stored control-point UVs with the same biquadratic basis as the positions
+vec2 bezpatch::evalsubpatchuv(int iu, int iv, float u, float v) const
+{
+    float bu[3] = { (1-u)*(1-u), 2*u*(1-u), u*u };
+    float bv[3] = { (1-v)*(1-v), 2*v*(1-v), v*v };
+    vec2 uv(0, 0);
+    loop(b, 3) loop(a, 3)
+        uv.add(vec2(cpuv[(2*iv+b)*cols + (2*iu+a)]).mul(bu[a]*bv[b]));
+    return uv;
+}
+
 void bezpatch::tessellate()
 {
     verts.setsize(0); norms.setsize(0); tangents.setsize(0); tcs.setsize(0); lmtc.setsize(0); tris.setsize(0);
@@ -48,34 +59,38 @@ void bezpatch::tessellate()
         evalsubpatch(iu, iv, gu - iu, gv - iv, pos, tu, tv);
         vec n;
         n.cross(tu, tv);
-        n = n.iszero() ? vec(0, 0, 1) : n.normalize();
-        // tangent = d/du orthonormalized against the normal (matches the diffuse-u direction)
-        vec tang = tu.iszero() ? vec(1, 0, 0) : vec(tu).normalize();
-        tang.sub(vec(n).mul(n.dot(tang)));
-        tang = tang.iszero() ? vec(1, 0, 0) : tang.normalize();
-        norms.add(n);
-        tangents.add(tang);
+        norms.add(n.iszero() ? vec(0, 0, 1) : n.normalize());
         verts.add(pos);
-        tcs.add(vec2(0, 0));   // filled below with world arc length
+        tcs.add(evalsubpatchuv(iu, iv, gu - iu, gv - iv));               // interpolated stored UVs
+        lmtc.add(vec2(su ? float(i)/su : 0, sv ? float(j)/sv : 0));      // grid fraction for the baked lightmap
+        tangents.add(vec(0, 0, 0));                                      // accumulated from the UV gradient below
     }
 
     int stride = su+1;
-    // natural (arc-length) texture coords in world units: distance along u (row 0) and v (col 0),
-    // so texel density stays uniform regardless of patch size/curvature.
-    loopj(sv+1) loopi(su+1)
-    {
-        float s = 0, t = 0;
-        loopk(i) s += verts[j*stride + k+1].dist(verts[j*stride + k]);
-        loopk(j) t += verts[(k+1)*stride + i].dist(verts[k*stride + i]);
-        tcs[j*stride + i] = vec2(s, t);
-        lmtc.add(vec2(su ? float(i)/su : 0, sv ? float(j)/sv : 0));   // grid fraction for the baked lightmap
-    }
-
     loopj(sv) loopi(su)
     {
         ushort a = j*stride + i, b = a+1, c = a+stride, d = c+1;
         tris.add(a); tris.add(b); tris.add(c);
         tris.add(c); tris.add(b); tris.add(d);
+    }
+
+    // per-vertex tangent from the position/UV gradient (Lengyel), so the normal map lines up with whatever
+    // UV mapping is stored. Accumulate per triangle, then orthonormalize against the normal.
+    for(int t = 0; t+2 < tris.length(); t += 3)
+    {
+        int i0 = tris[t], i1 = tris[t+1], i2 = tris[t+2];
+        vec e1 = vec(verts[i1]).sub(verts[i0]), e2 = vec(verts[i2]).sub(verts[i0]);
+        vec2 d1 = vec2(tcs[i1]).sub(tcs[i0]), d2 = vec2(tcs[i2]).sub(tcs[i0]);
+        float denom = d1.x*d2.y - d2.x*d1.y;
+        if(denom > -1e-9f && denom < 1e-9f) continue;
+        vec tan = vec(e1).mul(d2.y).sub(vec(e2).mul(d1.y)).mul(1.0f/denom);
+        tangents[i0].add(tan); tangents[i1].add(tan); tangents[i2].add(tan);
+    }
+    loopv(tangents)
+    {
+        vec t = tangents[i];
+        t.sub(vec(norms[i]).mul(norms[i].dot(t)));
+        tangents[i] = t.iszero() ? vec(1, 0, 0) : t.normalize();
     }
 }
 
@@ -90,7 +105,23 @@ void bezpatch::boundsphere(vec &center, float &radius) const
     radius = sqrtf(r2);
 }
 
-// ---- serialization (.ogz section, MAPVERSION>=35; runs on client and server) ----
+// default control-point UVs: planar projection onto the patch's dominant axis at a fixed scale. Computed
+// from the control points alone (no VSlot), so it works on the server and for old maps. patchprojaxis
+// refines it to match an adjacent cube (VSlot scale/rotation).
+void defaultpatchuv(bezpatch *p)
+{
+    vec e1 = vec(p->cp(p->cols-1, 0)).sub(p->cp(0, 0)), e2 = vec(p->cp(0, p->rows-1)).sub(p->cp(0, 0)), n;
+    n.cross(e1, e2);
+    if(n.iszero()) n = vec(0, 0, 1);
+    vec a(fabs(n.x), fabs(n.y), fabs(n.z));
+    int dim = a.x >= a.y && a.x >= a.z ? 0 : (a.y >= a.z ? 1 : 2);
+    static const int si[] = { 1, 0, 0 }, ti[] = { 2, 2, 1 };
+    float k = 1.0f/32.0f;
+    loop(y, p->rows) loop(x, p->cols) { const vec &c = p->cp(x, y); p->uv(x, y) = vec2(c[si[dim]]*k, c[ti[dim]]*k); }
+    p->dirty = true;
+}
+
+// ---- serialization (.ogz section, MAPVERSION>=35; runs on client and server; UVs added in v36) ----
 
 void saveworldpatches(stream *f)
 {
@@ -108,10 +139,11 @@ void saveworldpatches(stream *f)
             f->putlil<float>(p->ctrl[j].y);
             f->putlil<float>(p->ctrl[j].z);
         }
+        loopvj(p->cpuv) { f->putlil<float>(p->cpuv[j].x); f->putlil<float>(p->cpuv[j].y); }   // v36+
     }
 }
 
-void loadworldpatches(stream *f)
+void loadworldpatches(stream *f, int mapversion)
 {
     clearpatches();
     int n = f->getlil<int>();
@@ -132,6 +164,8 @@ void loadworldpatches(stream *f)
             p->ctrl[j].y = f->getlil<float>();
             p->ctrl[j].z = f->getlil<float>();
         }
+        if(mapversion >= 36) loopvj(p->cpuv) { p->cpuv[j].x = f->getlil<float>(); p->cpuv[j].y = f->getlil<float>(); }
+        else defaultpatchuv(p);   // pre-UV patches: synthesize a planar mapping
         p->dirty = true;
         patches.add(p);
     }
@@ -177,45 +211,22 @@ void bezpatch::uploadlm(uchar *rgbe0, uchar *rgbe1, uchar *rgbe2, int gw, int gh
 // --- bake interface: raw-pointer accessors so the (fast-math) lightmap.cpp bake never touches the struct ---
 int numpatches() { return patches.length(); }
 
-VARP(patchlmscale, 1, 8, 64);   // world units per baked lightmap texel (smaller = finer/slower)
-
-// Build a bake grid sampled at a world-space density (independent of the render tessellation), so the
-// baked lightmap stays smooth on large patches. The render mesh uses grid-fraction lm coords (lmtc),
-// which address this texture regardless of its resolution. Uses static buffers (the bake is single-threaded).
+// The bake uses the tessellation grid directly (its tangents are derived from the active UV mapping, so the
+// baked lightmap and the rendered normal map stay consistent). Lightmap resolution = tessellation; raise
+// patchtess for finer baked lighting.
 bool getpatchgrid(int i, const vec *&verts, const vec *&norms, const vec *&tangents, int &gw, int &gh)
 {
-    static vector<vec> bpos, bnrm, btang;
     if(!patches.inrange(i)) return false;
     bezpatch *p = patches[i];
     if(p->dirty) p->tessellate();
     int nu = p->usub(), nv = p->vsub();
     if(nu < 1 || nv < 1) return false;
-    float ulen = 0, vlen = 0;                         // patch arc lengths (from the natural tex coords)
-    loopvj(p->tcs) { ulen = max(ulen, p->tcs[j].x); vlen = max(vlen, p->tcs[j].y); }
-    gw = clamp(int(ulen/patchlmscale) + 1, 2, 128);
-    gh = clamp(int(vlen/patchlmscale) + 1, 2, 128);
-    // tangent frame matches the cube's (orientation_tangent for the patch's dominant face), so the
-    // normal map -- sampled in the same calctexgen space the render uses -- bumps consistently.
-    int dim = patchdim(p);
-    vec stan = orientation_tangent[lookupvslot(p->vslot, false).rotation][dim];
-    bpos.setsize(0); bnrm.setsize(0); btang.setsize(0);
-    loopj(gh) loopi(gw)
-    {
-        float gu = nu*float(i)/(gw-1), gv = nv*float(j)/(gh-1);
-        int iu = min(int(gu), nu-1), iv = min(int(gv), nv-1);
-        vec pos, tu, tv;
-        p->evalsubpatch(iu, iv, gu-iu, gv-iv, pos, tu, tv);
-        vec n;
-        n.cross(tu, tv);
-        n = n.iszero() ? vec(0, 0, 1) : n.normalize();
-        vec tang = vec(stan);
-        tang.sub(vec(n).mul(n.dot(tang)));
-        tang = tang.iszero() ? vec(1, 0, 0) : tang.normalize();
-        bpos.add(pos); bnrm.add(n); btang.add(tang);
-    }
-    verts = bpos.getbuf();
-    norms = bnrm.getbuf();
-    tangents = btang.getbuf();
+    gw = nu*p->tess + 1;
+    gh = nv*p->tess + 1;
+    if(p->verts.length() != gw*gh) return false;
+    verts = p->verts.getbuf();
+    norms = p->norms.getbuf();
+    tangents = p->tangents.getbuf();
     return true;
 }
 
@@ -346,6 +357,8 @@ ICOMMAND(newpatch, "i", (int *size),
     }
     p->dirty = true;
     patches.add(p);
+    extern void projectpatchuv_axis(bezpatch *p);
+    projectpatchuv_axis(p);                     // default to axis projection (matches a coplanar cube face)
     conoutf("created patch %d (%d total)", patches.length()-1, patches.length());
 });
 
@@ -423,20 +436,14 @@ void renderpatches()
         GLOBALPARAMF(pcolor, 2*vs.colorscale.x, 2*vs.colorscale.y, 2*vs.colorscale.z, 1.0f);   // 2x overbright, like world surfaces
         GLOBALPARAMF(pbump, norm ? 1.0f : 0.0f);
         GLOBALPARAMF(pglow, glow ? 1.0f : 0.0f);
-        // diffuse/normal coords via the same planar texgen the cube uses (matches orientation/scale/rotation)
-        int dim = patchdim(p);
-        vec4 sgen, tgen;
-        calctexgen(vs, dim, sgen, tgen);
         gle::begin(GL_TRIANGLES);
         loopvj(p->tris)
         {
             ushort idx = p->tris[j];
-            const vec &pos = p->verts[idx];
-            gle::attrib(pos);
+            gle::attrib(p->verts[idx]);
             gle::attrib(p->norms[idx]);
             gle::attrib(p->tangents[idx]);
-            gle::attrib(vec2(sgen.x*pos.x + sgen.y*pos.y + sgen.z*pos.z + sgen.w,
-                             tgen.x*pos.x + tgen.y*pos.y + tgen.z*pos.z + tgen.w));
+            gle::attrib(p->tcs[idx]);          // stored (interpolated) control-point UVs
             gle::attrib(p->lmtc[idx]);
         }
         xtraverts += gle::end();
@@ -611,6 +618,79 @@ ICOMMAND(patchnudge, "iifff", (int *patch, int *cp, float *dx, float *dy, float 
     if(!patches.inrange(*patch) || !patches[*patch]->ctrl.inrange(*cp)) return;
     patches[*patch]->ctrl[*cp].add(vec(*dx, *dy, *dz));
     patches[*patch]->dirty = true;
+});
+
+// ---- texture alignment: recompute the stored control-point UVs (GtkRadiant-style) ----------------
+
+// project from the patch's dominant axis-aligned plane, matching a coplanar cube face (slot scale/rotation)
+void projectpatchuv_axis(bezpatch *p)
+{
+    if(p->dirty) p->tessellate();
+    int dim = patchdim(p);
+    vec4 sgen, tgen;
+    calctexgen(lookupvslot(p->vslot, false), dim, sgen, tgen);
+    loop(y, p->rows) loop(x, p->cols)
+    {
+        const vec &c = p->cp(x, y);
+        p->uv(x, y) = vec2(sgen.x*c.x + sgen.y*c.y + sgen.z*c.z + sgen.w,
+                           tgen.x*c.x + tgen.y*c.y + tgen.z*c.z + tgen.w);
+    }
+    p->dirty = true;
+}
+
+// natural: arc length along the control net, at the slot's texel scale (good for curved patches)
+static void naturalpatchuv(bezpatch *p)
+{
+    VSlot &vs = lookupvslot(p->vslot, false);
+    Texture *tex = vs.slot && vs.slot->sts.inrange(0) ? vs.slot->sts[0].t : notexture;
+    float sc = vs.scale > 0 ? vs.scale : 1;
+    float sk = (TEX_SCALE/sc)/max(tex->xs, 1), tk = (TEX_SCALE/sc)/max(tex->ys, 1);
+    loop(y, p->rows) { float s = 0; loop(x, p->cols) { if(x) s += p->cp(x, y).dist(p->cp(x-1, y)); p->uv(x, y).x = s*sk; } }
+    loop(x, p->cols) { float t = 0; loop(y, p->rows) { if(y) t += p->cp(x, y).dist(p->cp(x, y-1)); p->uv(x, y).y = t*tk; } }
+    p->dirty = true;
+}
+
+ICOMMAND(patchprojaxis, "", (), { if(noedit(true)) return; bezpatch *p = activepatch(); if(p) projectpatchuv_axis(p); });
+ICOMMAND(patchnaturalize, "", (), { if(noedit(true)) return; bezpatch *p = activepatch(); if(p) naturalpatchuv(p); });
+ICOMMAND(patchfit, "ff", (float *tu, float *tv),
+{
+    if(noedit(true)) return;
+    bezpatch *p = activepatch();
+    if(!p) return;
+    float su = *tu > 0 ? *tu : 1;
+    float sv = *tv > 0 ? *tv : 1;
+    loop(y, p->rows) loop(x, p->cols)
+        p->uv(x, y) = vec2(su*x/max(p->cols-1, 1), sv*y/max(p->rows-1, 1));
+    p->dirty = true;
+});
+
+// ---- geometry fix commands ----------------------------------------------------------------------
+
+// flip the surface normals (reverse the u parametric direction; keeps UVs aligned)
+ICOMMAND(patchinvert, "", (),
+{
+    if(noedit(true)) return;
+    bezpatch *p = activepatch();
+    if(!p) return;
+    loop(y, p->rows) loop(x, p->cols/2)
+    {
+        swap(p->cp(x, y), p->cp(p->cols-1-x, y));
+        swap(p->uv(x, y), p->uv(p->cols-1-x, y));
+    }
+    p->dirty = true;
+});
+
+// even out control-point spacing: each sub-patch midpoint moves to the average of its endpoints
+ICOMMAND(patchredisperse, "", (),
+{
+    if(noedit(true)) return;
+    bezpatch *p = activepatch();
+    if(!p) return;
+    for(int x = 1; x < p->cols; x += 2) loop(y, p->rows)
+        p->cp(x, y) = vec(p->cp(x-1, y)).add(p->cp(x+1, y)).mul(0.5f);
+    for(int y = 1; y < p->rows; y += 2) loop(x, p->cols)
+        p->cp(x, y) = vec(p->cp(x, y-1)).add(p->cp(x, y+1)).mul(0.5f);
+    p->dirty = true;
 });
 
 #endif // !STANDALONE

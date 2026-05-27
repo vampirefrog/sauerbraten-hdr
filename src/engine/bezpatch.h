@@ -12,6 +12,7 @@ struct bezpatch
 {
     int cols, rows;          // control-point grid dimensions (odd, >=3)
     vector<vec> ctrl;        // cols*rows control points, row-major (index = y*cols + x)
+    vector<vec2> cpuv;       // per-control-point texture coords (interpolated across the patch; GtkRadiant-style)
     int vslot;               // texture/material slot index (as in cube.texture[])
     int tess;                // subdivision segments per sub-patch axis (>=1)
 
@@ -30,15 +31,20 @@ struct bezpatch
 
     vec &cp(int x, int y) { return ctrl[y*cols + x]; }
     const vec &cp(int x, int y) const { return ctrl[y*cols + x]; }
+    vec2 &uv(int x, int y) { return cpuv[y*cols + x]; }
 
     void setdims(int c, int r)         // (re)size the control grid, preserving overlapping points
     {
         vector<vec> old; old.move(ctrl);
+        vector<vec2> olduv; olduv.move(cpuv);
         int oc = cols, orr = rows;
         cols = c; rows = r;
-        ctrl.setsize(0);
+        ctrl.setsize(0); cpuv.setsize(0);
         loop(y, rows) loop(x, cols)
+        {
             ctrl.add(x < oc && y < orr ? old[y*oc + x] : vec(0, 0, 0));
+            cpuv.add(x < oc && y < orr && olduv.inrange(y*oc + x) ? olduv[y*oc + x] : vec2(0, 0));
+        }
         dirty = true;
     }
 
@@ -46,6 +52,7 @@ struct bezpatch
     int vsub() const { return (rows-1)/2; }    // sub-patches along v
 
     void evalsubpatch(int iu, int iv, float u, float v, vec &pos, vec &du, vec &dv) const;
+    vec2 evalsubpatchuv(int iu, int iv, float u, float v) const;   // interpolate the stored control-point UVs
     void tessellate();
     void boundsphere(vec &center, float &radius) const;
 #ifndef STANDALONE
@@ -58,7 +65,8 @@ extern vector<bezpatch *> patches;
 
 extern void clearpatches();
 extern void saveworldpatches(stream *f);   // self-describing section (leading count), version>=35
-extern void loadworldpatches(stream *f);
+extern void loadworldpatches(stream *f, int mapversion);
+extern void defaultpatchuv(bezpatch *p);
 #ifndef STANDALONE
 extern void renderpatches();
 extern void editpatches(const vec &ray);   // continue an in-progress control-point drag
