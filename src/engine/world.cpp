@@ -1278,12 +1278,14 @@ bool emptymap(int scale, bool force, const char *mname, bool usecfg)    // main 
 
     clearmainmenu();
 
+#ifndef STANDALONE
     if(usecfg)
     {
         identflags |= IDF_OVERRIDDEN;
         execfile("data/default_map_settings.cfg", false);
         identflags &= ~IDF_OVERRIDDEN;
     }
+#endif
 
     initlights();
     allchanged(true);

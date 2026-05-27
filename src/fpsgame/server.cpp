@@ -3764,8 +3764,9 @@ namespace server
                     if(m_edit)
                     {
                         // build the server's own blank octree so it can track edits on it
+                        // (usecfg=false: skip the rendering-only map cfg, like load_world does)
                         setservermapfile(servermappath);
-                        emptymap(size, true, NULL, true);
+                        emptymap(size, true, NULL, false);
                         serverhasmap = true;
                         mapdatadirty = true;
                     }

@@ -1290,10 +1290,16 @@ bool load_world(const char *mname, const char *cname)        // still supports a
 
     clearmainmenu();
 
+#ifndef STANDALONE
+    // The map cfg only configures rendering (textures, mapmodels, shaders, materials,
+    // skybox); the dedicated server needs none of it and would just spam "unknown command"
+    // for the client-only commands. The map's geometry/vslots/entities/vars come from the
+    // .ogz itself, so the server skips the cfg exec entirely.
     identflags |= IDF_OVERRIDDEN;
     execfile("data/default_map_settings.cfg", false);
     execfile(cfgname, false);
     identflags &= ~IDF_OVERRIDDEN;
+#endif
    
     extern void fixlightmapnormals();
     if(hdr.version <= 25) fixlightmapnormals();
