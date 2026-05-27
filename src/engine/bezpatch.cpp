@@ -147,7 +147,9 @@ ICOMMAND(clearpatches, "", (),
 
 ICOMMAND(patchcount, "", (), { conoutf("%d patches", patches.length()); intret(patches.length()); });
 
-// ---- rendering (Phase 1: flat-shaded solid + control net in edit mode) -----
+// ---- rendering (flat-shaded solid + control-point handles in edit mode) -----
+
+void renderpatchhandles();
 
 void renderpatches()
 {
@@ -169,24 +171,142 @@ void renderpatches()
         xtraverts += gle::end();
     }
 
-    if(editmode)
-    {
-        // control net: lines between adjacent control points
-        gle::colorub(60, 120, 220);
-        loopv(patches)
-        {
-            bezpatch *p = patches[i];
-            gle::begin(GL_LINES);
-            loop(y, p->rows) loop(x, p->cols)
-            {
-                if(x+1 < p->cols) { gle::attrib(p->cp(x, y)); gle::attrib(p->cp(x+1, y)); }
-                if(y+1 < p->rows) { gle::attrib(p->cp(x, y)); gle::attrib(p->cp(x, y+1)); }
-            }
-            xtraverts += gle::end();
-        }
-    }
+    if(editmode) renderpatchhandles();
 
     glEnable(GL_CULL_FACE);
 }
+
+// ---- control-point editing (mirrors the entity drag mechanism) -------------
+
+extern bool editmoveplane(const vec &o, const vec &ray, int d, float off, vec &handle, vec &dest, bool first);
+extern void boxs3D(const vec &o, vec s, int g);
+
+int patchhover = -1, patchhovercp = -1;   // patch + control-point index under the crosshair
+int patchmoving = 0;                       // 0 idle, 1 first drag frame, 2 dragging
+FVARP(patchhandlesize, 0.5f, 2.0f, 16.0f); // half-extent of a control-point handle cube
+
+// squared perpendicular distance from p to the ray (o,dir); t = signed distance along dir
+static float raypointdist2(const vec &o, const vec &dir, const vec &p, float &t)
+{
+    vec op = vec(p).sub(o);
+    t = op.dot(dir);
+    if(t <= 0) { t = 0; return op.squaredlen(); }
+    return vec(dir).mul(t).add(o).squaredist(p);
+}
+
+void updatepatchhover(const vec &o, const vec &ray)
+{
+    patchhover = patchhovercp = -1;
+    float best = 1e16f;
+    loopv(patches)
+    {
+        bezpatch *p = patches[i];
+        loopvj(p->ctrl)
+        {
+            float t;
+            float d2 = raypointdist2(o, ray, p->ctrl[j], t);
+            float pr = max(patchhandlesize*1.5f, t*0.025f);   // grows with distance for easy picking
+            if(t > 0 && d2 < pr*pr && t < best) { best = t; patchhover = i; patchhovercp = j; }
+        }
+    }
+}
+
+void patchdrag(const vec &ray)
+{
+    if(!patches.inrange(patchhover)) { patchmoving = 0; return; }
+    bezpatch *p = patches[patchhover];
+    if(!p->ctrl.inrange(patchhovercp)) { patchmoving = 0; return; }
+    vec &c = p->ctrl[patchhovercp];
+    // drag in the plane perpendicular to the camera's dominant axis (closest axis-aligned view plane)
+    int d = fabs(ray.x) >= fabs(ray.y) && fabs(ray.x) >= fabs(ray.z) ? 0 : (fabs(ray.y) >= fabs(ray.z) ? 1 : 2);
+    static vec handle, dest;
+    if(!editmoveplane(c, ray, d, c[d], handle, dest, patchmoving==1)) return;
+    c[R[d]] = dest[R[d]];
+    c[C[d]] = dest[C[d]];
+    p->dirty = true;
+    patchmoving = 2;
+}
+
+// called once per frame from rendereditcursor
+void editpatches(const vec &ray)
+{
+    if(patchmoving) patchdrag(ray);
+    else updatepatchhover(player->o, ray);
+}
+
+void renderpatchhandles()
+{
+    loopv(patches)
+    {
+        bezpatch *p = patches[i];
+        // control net
+        gle::colorub(60, 120, 220);
+        gle::begin(GL_LINES);
+        loop(y, p->rows) loop(x, p->cols)
+        {
+            if(x+1 < p->cols) { gle::attrib(p->cp(x, y)); gle::attrib(p->cp(x+1, y)); }
+            if(y+1 < p->rows) { gle::attrib(p->cp(x, y)); gle::attrib(p->cp(x, y+1)); }
+        }
+        xtraverts += gle::end();
+        // handle cubes
+        loopvj(p->ctrl)
+        {
+            bool hov = i==patchhover && j==patchhovercp;
+            if(hov) gle::colorub(255, 240, 40); else gle::colorub(40, 200, 90);
+            float h = patchhandlesize;
+            boxs3D(vec(p->ctrl[j]).sub(h), vec(2*h), 1);
+        }
+    }
+}
+
+// hovering a control point starts/continues a drag (bind a key to this, like entmoving)
+ICOMMAND(patchmoving, "b", (int *n),
+{
+    if(*n >= 0)
+    {
+        if(!*n || patchhover < 0 || noedit(true)) patchmoving = 0;
+        else if(!patchmoving) patchmoving = 1;
+    }
+    intret(patchmoving);
+});
+
+// active patch for grow/shrink/material ops: the hovered one, else the last created
+static bezpatch *activepatch()
+{
+    if(patches.inrange(patchhover)) return patches[patchhover];
+    return patches.empty() ? NULL : patches.last();
+}
+
+// grow/shrink by whole biquadratic sub-patches (+/-2 control points per axis), Quake3/Radiant style
+ICOMMAND(patchgrow, "ii", (int *du, int *dv),
+{
+    if(noedit(true)) return;
+    bezpatch *p = activepatch();
+    if(!p) { conoutf("no patch"); return; }
+    int nc = clamp(p->cols + 2*(*du), 3, 99);
+    int nr = clamp(p->rows + 2*(*dv), 3, 99);
+    if(!(nc&1)) nc--;
+    if(!(nr&1)) nr--;
+    p->setdims(nc, nr);
+    conoutf("patch grid %dx%d", p->cols, p->rows);
+});
+
+// set one control point explicitly (scripting + basis for fix/align commands)
+ICOMMAND(patchcp, "iifff", (int *patch, int *cp, float *x, float *y, float *z),
+{
+    if(noedit(true)) return;
+    if(!patches.inrange(*patch) || !patches[*patch]->ctrl.inrange(*cp)) return;
+    patches[*patch]->ctrl[*cp] = vec(*x, *y, *z);
+    patches[*patch]->dirty = true;
+});
+
+// move a control point by a delta (scripting/testing)
+ICOMMAND(patchnudge, "iifff", (int *patch, int *cp, float *dx, float *dy, float *dz),
+{
+    if(noedit(true)) return;
+    if(!patches.inrange(*patch) || !patches[*patch]->ctrl.inrange(*cp)) return;
+    patches[*patch]->ctrl[*cp].add(vec(*dx, *dy, *dz));
+    patches[*patch]->dirty = true;
+});
 
 #endif // !STANDALONE
