@@ -188,6 +188,13 @@ extern int currentedittex();
 
 VARP(patchtexscale, 1, 32, 512);   // world units per texture tile (before the slot's own scale)
 
+// find a slot texture of a given type (TEX_NORMAL/TEX_GLOW/...), like changeslottmus does
+static Texture *slottex(Slot &s, int type)
+{
+    loopvj(s.sts) if(s.sts[j].type == type && s.sts[j].t) return s.sts[j].t;
+    return NULL;
+}
+
 void renderpatches()
 {
     if(patches.empty()) return;
@@ -195,8 +202,18 @@ void renderpatches()
 
     glDisable(GL_CULL_FACE);     // patches are two-sided until per-face culling settles in a later phase
     glDisable(GL_BLEND);
-    SETSHADER(texture);          // built-in: gl_FragColor = vcolor * texture2D(tex0, texcoord0)
+    SETSHADER(bezpatch);
+
+    // forward sun + ambient lighting (shared by all patches this frame), HDR-scaled into the fp16 buffer
+    GLOBALPARAM(psundir, sunlightdir);
+    GLOBALPARAMF(psun, sunlightcolor.x/255.0f*sunlightscale, sunlightcolor.y/255.0f*sunlightscale, sunlightcolor.z/255.0f*sunlightscale);
+    GLOBALPARAMF(pambient, max(max(ambientcolor.x, skylightcolor.x)/255.0f, 0.15f),
+                            max(max(ambientcolor.y, skylightcolor.y)/255.0f, 0.15f),
+                            max(max(ambientcolor.z, skylightcolor.z)/255.0f, 0.15f));
+
     gle::defvertex();
+    gle::defnormal();
+    gle::deftangent(3);
     gle::deftexcoord0();
 
     loopv(patches)
@@ -205,15 +222,23 @@ void renderpatches()
         if(p->tris.empty()) continue;
         VSlot &vs = lookupvslot(p->vslot, true);
         Slot &s = *vs.slot;
-        Texture *t = s.sts.inrange(0) ? s.sts[0].t : notexture;
-        glBindTexture(GL_TEXTURE_2D, t->id);
+        Texture *diffuse = s.sts.inrange(0) ? s.sts[0].t : notexture;
+        Texture *norm = slottex(s, TEX_NORMAL), *glow = slottex(s, TEX_GLOW);
+        glActiveTexture_(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, diffuse->id);
+        glActiveTexture_(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, (norm ? norm : notexture)->id);
+        glActiveTexture_(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, (glow ? glow : notexture)->id);
+        glActiveTexture_(GL_TEXTURE0);
+        GLOBALPARAMF(pcolor, vs.colorscale.x, vs.colorscale.y, vs.colorscale.z, 1.0f);
+        GLOBALPARAMF(pbump, norm ? 1.0f : 0.0f);
+        GLOBALPARAMF(pglow, glow ? 1.0f : 0.0f);
         float inv = 1.0f / (patchtexscale * (vs.scale > 0 ? vs.scale : 1));
-        gle::color(vec(vs.colorscale).mul(0.8f));   // flat-lit until lightmaps land (phase 5)
         gle::begin(GL_TRIANGLES);
         loopvj(p->tris)
         {
             ushort idx = p->tris[j];
             gle::attrib(p->verts[idx]);
+            gle::attrib(p->norms[idx]);
+            gle::attrib(p->tangents[idx]);
             gle::attrib(vec2(p->tcs[idx]).mul(inv));
         }
         xtraverts += gle::end();
