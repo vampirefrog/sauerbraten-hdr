@@ -2127,12 +2127,14 @@ namespace game
     }
     COMMAND(listdemos, "");
 
+    VARP(sendlightmaps, 0, 0, 1); // /sendmap includes baked lightmaps (larger; note the 4MB limit)
+
     void sendmap()
     {
         if(!m_edit || (player1->state==CS_SPECTATOR && remote && !player1->privilege)) { conoutf(CON_ERROR, "\"sendmap\" only works in coop edit mode"); return; }
         conoutf("sending map...");
         defformatstring(mname, "sendmap_%d", lastmillis);
-        save_world(mname, true);
+        save_world(mname, !sendlightmaps);
         defformatstring(fname, "packages/base/%s.ogz", mname);
         stream *map = openrawfile(path(fname), "rb");
         if(map)
