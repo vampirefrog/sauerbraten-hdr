@@ -318,6 +318,7 @@ float patchshadowdist(const vec &o, const vec &dir, float radius)
 
 // edit state (defined up here so the creation commands can reference them)
 int patchhover = -1, patchhovercp = -1;   // patch + control-point index under the crosshair
+int patchsel = -1;                         // sticky "active" patch (last hovered); grid + commands target it
 int patchorient = 0;                       // box face under the crosshair (like entorient)
 int patchmoving = 0;                       // 0 idle, 1 first drag frame, 2 dragging
 
@@ -496,6 +497,7 @@ float raypatchcp(const vec &o, const vec &ray)
             }
         }
     }
+    if(patchhover >= 0) patchsel = patchhover;   // remember the active patch (sticky)
     return best;
 }
 
@@ -531,10 +533,10 @@ void editpatches(const vec &ray)
 
 void renderpatchhandles()
 {
-    loopv(patches)
+    // control net only on the active patch (keeps the view uncluttered; markers still show on all patches)
+    if(patches.inrange(patchsel))
     {
-        bezpatch *p = patches[i];
-        // control net
+        bezpatch *p = patches[patchsel];
         gle::colorub(60, 120, 220);
         gle::defvertex();
         gle::begin(GL_LINES);
@@ -575,6 +577,7 @@ ICOMMAND(patchmoving, "b", (int *n),
 // active patch for grow/shrink/material ops: the hovered one, else the last created
 static bezpatch *activepatch()
 {
+    if(patches.inrange(patchsel)) return patches[patchsel];
     if(patches.inrange(patchhover)) return patches[patchhover];
     return patches.empty() ? NULL : patches.last();
 }
@@ -691,6 +694,58 @@ ICOMMAND(patchredisperse, "", (),
     for(int y = 1; y < p->rows; y += 2) loop(x, p->cols)
         p->cp(x, y) = vec(p->cp(x, y-1)).add(p->cp(x, y+1)).mul(0.5f);
     p->dirty = true;
+});
+
+// ---- delete / copy / paste ----------------------------------------------------------------------
+
+// delete the patch whose control point is under the crosshair; returns 1 if it deleted one (so the edit
+// DEL binding can fall through to cube/entity deletion otherwise). Bound via editdel in stdedit.cfg.
+ICOMMAND(delpatch, "", (),
+{
+    if(noedit(true) || !patches.inrange(patchhover)) { intret(0); return; }
+    int idx = patchhover;
+    patches[idx]->freelm();
+    delete patches.remove(idx);
+    patchhover = patchhovercp = -1;
+    patchsel = -1;
+    patchmoving = 0;
+    intret(1);
+});
+
+// 1 when a patch control point is under the crosshair (so the edit copy/paste/del binds target the patch)
+ICOMMAND(patchhovering, "", (), { intret(patches.inrange(patchhover) ? 1 : 0); });
+
+static bezpatch patchclipboard;
+static bool haspatchclip = false;
+
+ICOMMAND(patchcopy, "", (),
+{
+    if(noedit(true)) return;
+    bezpatch *p = activepatch();
+    if(!p) { conoutf("no patch"); return; }
+    patchclipboard.setdims(p->cols, p->rows);
+    patchclipboard.vslot = p->vslot;
+    patchclipboard.tess = p->tess;
+    loopv(p->ctrl) patchclipboard.ctrl[i] = p->ctrl[i];
+    loopv(p->cpuv) patchclipboard.cpuv[i] = p->cpuv[i];
+    haspatchclip = true;
+    conoutf("copied patch (%dx%d)", p->cols, p->rows);
+});
+
+ICOMMAND(patchpaste, "", (),
+{
+    if(noedit(true) || !haspatchclip) return;
+    bezpatch *p = new bezpatch;
+    p->setdims(patchclipboard.cols, patchclipboard.rows);
+    p->vslot = patchclipboard.vslot;
+    p->tess = patchclipboard.tess;
+    int g = sel.grid > 0 ? sel.grid : 16;
+    loopv(p->ctrl) p->ctrl[i] = vec(patchclipboard.ctrl[i]).add(vec(g, g, 0));   // offset so it doesn't overlap
+    loopv(p->cpuv) p->cpuv[i] = patchclipboard.cpuv[i];
+    p->dirty = true;
+    patches.add(p);
+    patchsel = patches.length()-1;
+    conoutf("pasted patch %d", patchsel);
 });
 
 #endif // !STANDALONE
