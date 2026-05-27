@@ -165,18 +165,41 @@ void bezpatch::uploadlm(uchar *rgbe0, uchar *rgbe1, uchar *rgbe2, int gw, int gh
 // --- bake interface: raw-pointer accessors so the (fast-math) lightmap.cpp bake never touches the struct ---
 int numpatches() { return patches.length(); }
 
+VARP(patchlmscale, 1, 8, 64);   // world units per baked lightmap texel (smaller = finer/slower)
+
+// Build a bake grid sampled at a world-space density (independent of the render tessellation), so the
+// baked lightmap stays smooth on large patches. The render mesh uses grid-fraction lm coords (lmtc),
+// which address this texture regardless of its resolution. Uses static buffers (the bake is single-threaded).
 bool getpatchgrid(int i, const vec *&verts, const vec *&norms, const vec *&tangents, int &gw, int &gh)
 {
+    static vector<vec> bpos, bnrm, btang;
     if(!patches.inrange(i)) return false;
     bezpatch *p = patches[i];
     if(p->dirty) p->tessellate();
     int nu = p->usub(), nv = p->vsub();
-    gw = nu*p->tess + 1;
-    gh = nv*p->tess + 1;
-    if(p->verts.length() != gw*gh) return false;
-    verts = p->verts.getbuf();
-    norms = p->norms.getbuf();
-    tangents = p->tangents.getbuf();
+    if(nu < 1 || nv < 1) return false;
+    float ulen = 0, vlen = 0;                         // patch arc lengths (from the natural tex coords)
+    loopvj(p->tcs) { ulen = max(ulen, p->tcs[j].x); vlen = max(vlen, p->tcs[j].y); }
+    gw = clamp(int(ulen/patchlmscale) + 1, 2, 128);
+    gh = clamp(int(vlen/patchlmscale) + 1, 2, 128);
+    bpos.setsize(0); bnrm.setsize(0); btang.setsize(0);
+    loopj(gh) loopi(gw)
+    {
+        float gu = nu*float(i)/(gw-1), gv = nv*float(j)/(gh-1);
+        int iu = min(int(gu), nu-1), iv = min(int(gv), nv-1);
+        vec pos, tu, tv;
+        p->evalsubpatch(iu, iv, gu-iu, gv-iv, pos, tu, tv);
+        vec n;
+        n.cross(tu, tv);
+        n = n.iszero() ? vec(0, 0, 1) : n.normalize();
+        vec tang = tu.iszero() ? vec(1, 0, 0) : vec(tu).normalize();
+        tang.sub(vec(n).mul(n.dot(tang)));
+        tang = tang.iszero() ? vec(1, 0, 0) : tang.normalize();
+        bpos.add(pos); bnrm.add(n); btang.add(tang);
+    }
+    verts = bpos.getbuf();
+    norms = bnrm.getbuf();
+    tangents = btang.getbuf();
     return true;
 }
 
