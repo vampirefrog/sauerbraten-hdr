@@ -394,9 +394,10 @@ void renderpatches()
     // forward sun + ambient (used by unbaked patches; baked patches sample their RNM lightmaps instead)
     GLOBALPARAM(psundir, sunlightdir);
     GLOBALPARAMF(psun, sunlightcolor.x/255.0f*sunlightscale, sunlightcolor.y/255.0f*sunlightscale, sunlightcolor.z/255.0f*sunlightscale);
-    GLOBALPARAMF(pambient, max(max(ambientcolor.x, skylightcolor.x)/255.0f, 0.15f),
-                            max(max(ambientcolor.y, skylightcolor.y)/255.0f, 0.15f),
-                            max(max(ambientcolor.z, skylightcolor.z)/255.0f, 0.15f));
+    // flat ambient floor for unbaked patches: visible grey rather than near-black before /calclight
+    GLOBALPARAMF(pambient, max(max(ambientcolor.x, skylightcolor.x)/255.0f, 0.35f),
+                            max(max(ambientcolor.y, skylightcolor.y)/255.0f, 0.35f),
+                            max(max(ambientcolor.z, skylightcolor.z)/255.0f, 0.35f));
 
     gle::defvertex();
     gle::defnormal();
