@@ -171,9 +171,9 @@ void renderpatches()
         xtraverts += gle::end();
     }
 
-    if(editmode) renderpatchhandles();
-
     glEnable(GL_CULL_FACE);
+    // control-point handles are NOT drawn here: they are rendered from rendereditcursor() so they
+    // share the entity-selection render state (additive blend + line offset) and thus look identical.
 }
 
 // ---- control-point editing (mirrors the entity drag mechanism) -------------
@@ -183,6 +183,8 @@ extern void boxs3D(const vec &o, vec s, int g);
 extern void boxs(int orient, vec o, const vec &s);
 extern void boxs(int orient, vec o, const vec &s, float size);
 extern int entselradius;   // world.cpp: size of an entity position marker; control points match it
+extern int entselsnap;
+extern selinfo sel;
 
 int patchhover = -1, patchhovercp = -1;   // patch + control-point index under the crosshair
 int patchorient = 0;                       // box face under the crosshair (like entorient)
@@ -236,8 +238,13 @@ void patchdrag(const vec &ray)
     cpbox(c, eo, es);
     static vec handle, dest;
     if(!editmoveplane(c, ray, d, eo[d] + (dc ? es[d] : 0), handle, dest, patchmoving==1)) return;
-    c[R[d]] = dest[R[d]];
-    c[C[d]] = dest[C[d]];
+    // grid snap within the face plane -- identical to entdrag()'s entselsnap handling
+    ivec g(dest);
+    int z = g[d]&(~(sel.grid-1));
+    g.add(sel.grid/2).mask(~(sel.grid-1));
+    g[d] = z;
+    c[R[d]] = entselsnap ? g[R[d]] : dest[R[d]];
+    c[C[d]] = entselsnap ? g[C[d]] : dest[C[d]];
     p->dirty = true;
     patchmoving = 2;
 }

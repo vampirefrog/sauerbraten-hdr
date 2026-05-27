@@ -368,6 +368,7 @@ inline bool isheightmap(int orient, int d, bool empty, cube *c);
 extern void entdrag(const vec &ray);
 extern void editpatches(const vec &ray);   // bezpatch.cpp (declared locally, like entdrag)
 extern float raypatchcp(const vec &o, const vec &ray);
+extern void renderpatchhandles();
 extern int patchmoving, patchhover, patchhovercp;
 extern bool hoveringonent(int ent, int orient);
 extern void renderentselection(const vec &o, const vec &ray, bool entmoving);
@@ -545,6 +546,7 @@ void rendereditcursor()
     notextureshader->set();
 
     renderentselection(player->o, camdir, entmoving!=0);
+    renderpatchhandles();   // bezier control points: same pass/state as entity handles
 
     float offset = 1.0f;
     if (outline!=0) {
