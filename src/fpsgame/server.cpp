@@ -227,6 +227,7 @@ namespace server
         string clientmap;
         int mapcrc;
         bool warned, gameclip;
+        bool mapsent;          // server has pushed its stored map to this client once (this connection)
         ENetPacket *getdemo, *getmap, *clipboard;
         editinfo *edit;          // server-side copy/paste buffer for applying coop edits to its octree
         int lastclipboard, needclipboard;
@@ -301,6 +302,7 @@ namespace server
             mapcrc = 0;
             warned = false;
             gameclip = false;
+            mapsent = false;
         }
 
         void reassign()
@@ -3342,14 +3344,19 @@ namespace server
                 if(!ci) break;
                 // make sure the send-buffer reflects the latest applied edits before deciding.
                 if(mapdatadirty) persistcurrentmap();
-                // auto-send the server's stored map to a joining/mismatched client so they don't have to
-                // /getmap. The map is dropped on a real map change (see changemap), so a non-NULL mapdata here
-                // always means "the server holds data for the CURRENT map" -- safe to push (won't revert a fresh
-                // /map change, but will serve a reconnecting client the latest edited map).
-                if(m_edit && mapdata && mapdatacrc && !ci->getmap && (uint)crc != mapdatacrc)
+                // push the server's stored map to the client ONCE per connection, regardless of name/crc -- so a
+                // (re)connecting client always ends up on the server's current (edited) map without /getmap. We
+                // gate on mapsent (not crc) because the client re-reports N_MAPCRC after loading the pushed map,
+                // which would loop. mapdata is dropped on a real /map change, so right after a change there's
+                // nothing to push (clients keep their local/empty load); a /sendmap then seeds + forwards it.
+                if(m_edit && mapdata && !ci->mapsent && !ci->getmap)
                 {
                     if((ci->getmap = sendfile(ci->clientnum, 2, mapdata, "ri", N_SENDMAP)))
+                    {
                         ci->getmap->freeCallback = freegetmap;
+                        ci->mapsent = true;
+                        logoutf("sent server map to cn%d (%s, crc %u)", ci->clientnum, mapdataname, mapdatacrc);
+                    }
                 }
                 if(strcmp(text, smapname))
                 {
