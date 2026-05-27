@@ -68,6 +68,19 @@ namespace mpr
             loopi(6) { float d = n.dot(v[i]); if(d > bestd) { bestd = d; best = i; } }
             return v[best];
         }
+
+        // the triangle's face normal, oriented outward (toward the contact wn) and only returned when the
+        // entity is actually moving into that face -- same contract as the Ent/Cube contactface() methods,
+        // so the physics gets a stable wall/floor normal (no oscillation, proper grounding).
+        vec contactface(const vec &wn, const vec &dir) const
+        {
+            vec n;
+            n.cross(vec(v[1]).sub(v[0]), vec(v[2]).sub(v[0]));
+            if(n.iszero()) return vec(0, 0, 0);
+            n.normalize();
+            if(n.dot(wn) < 0) n.neg();
+            return n.dot(dir) < 0 ? n : vec(0, 0, 0);
+        }
     };
 
     struct Ent

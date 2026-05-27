@@ -1014,16 +1014,17 @@ static inline bool cubecollide(physent *d, const vec &dir, float cutoff, const c
 template<class E>
 static bool trianglecollide(physent *d, const vec &dir, const vec &a, const vec &b, const vec &c)
 {
-    vec n;
-    n.cross(vec(b).sub(a), vec(c).sub(a));
-    if(n.iszero()) return false;
-    n.normalize();
-    mpr::Triangle tri(a, b, c, 4.0f);
     E entvol(d);
-    if(!mpr::collide(tri, entvol)) return false;
-    if(n.dot(vec(d->o).sub(tri.center())) < 0) n.neg();   // orient the wall normal toward the player
-    collidewall = n;
-    return true;
+    mpr::Triangle tri(a, b, c, 4.0f);
+    vec cp;
+    if(mpr::collide(entvol, tri, NULL, NULL, &cp))
+    {
+        vec wn = vec(cp).sub(tri.center());
+        collidewall = tri.contactface(wn, dir.iszero() ? vec(wn).neg() : dir);
+        if(!collidewall.iszero()) return true;
+        collideinside++;
+    }
+    return false;
 }
 
 bool collidetriangle(physent *d, const vec &dir, float cutoff, const vec &a, const vec &b, const vec &c)
