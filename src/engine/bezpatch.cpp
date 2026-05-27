@@ -30,7 +30,7 @@ void bezpatch::evalsubpatch(int iu, int iv, float u, float v, vec &pos, vec &du,
 
 void bezpatch::tessellate()
 {
-    verts.setsize(0); norms.setsize(0); tcs.setsize(0); tris.setsize(0);
+    verts.setsize(0); norms.setsize(0); tangents.setsize(0); tcs.setsize(0); tris.setsize(0);
     dirty = false;
     int nu = usub(), nv = vsub();
     if(nu < 1 || nv < 1 || tess < 1) return;
@@ -45,7 +45,13 @@ void bezpatch::tessellate()
         evalsubpatch(iu, iv, gu - iu, gv - iv, pos, tu, tv);
         vec n;
         n.cross(tu, tv);
-        norms.add(n.iszero() ? vec(0, 0, 1) : n.normalize());
+        n = n.iszero() ? vec(0, 0, 1) : n.normalize();
+        // tangent = d/du orthonormalized against the normal (matches the diffuse-u direction)
+        vec tang = tu.iszero() ? vec(1, 0, 0) : vec(tu).normalize();
+        tang.sub(vec(n).mul(n.dot(tang)));
+        tang = tang.iszero() ? vec(1, 0, 0) : tang.normalize();
+        norms.add(n);
+        tangents.add(tang);
         verts.add(pos);
         tcs.add(vec2(0, 0));   // filled below with world arc length
     }

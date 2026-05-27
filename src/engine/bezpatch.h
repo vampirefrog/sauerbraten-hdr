@@ -18,8 +18,9 @@ struct bezpatch
     // tessellated mesh, rebuilt lazily when dirty
     vector<vec> verts;       // positions
     vector<vec> norms;       // normals
-    vector<vec2> tcs;        // natural-parameter texture coords (sub-patch units)
-    vector<ushort> tris;     // triangle indices into verts/norms/tcs
+    vector<vec> tangents;    // surface tangent (d/du), orthonormalized vs normal -- for normal mapping
+    vector<vec2> tcs;        // natural (arc-length) texture coords, world units
+    vector<ushort> tris;     // triangle indices into the per-vertex arrays
     bool dirty;
 
     bezpatch() : cols(0), rows(0), vslot(0), tess(4), dirty(true) { setdims(3, 3); }

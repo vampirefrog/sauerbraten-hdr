@@ -195,6 +195,11 @@ $(filter fpsgame/%,$(CLIENT_OBJS)): $(filter fpsgame/%,$(CLIENT_PCH))
 
 $(SERVER_MASTER_OBJS): CXXFLAGS += $(SERVER_INCLUDES)
 
+# g++ 14 + -ffast-math miscompiles bezpatch.h symbol visibility in this large TU (struct members
+# vanish under integrated compilation though -E is correct). bezpatch is not a hot path, so build
+# it without fast-math; this is also safer for the geometry/bake float math.
+engine/bezpatch.o engine/bezpatch-standalone.o: CXXFLAGS += -fno-fast-math
+
 ifneq (,$(findstring MINGW,$(PLATFORM)))
 client: $(CLIENT_OBJS)
 	$(WINDRES) -I vcpp -i vcpp/mingw.rc -J rc -o vcpp/mingw.res -O coff
