@@ -368,6 +368,9 @@ extern void adddecal(int type, const vec &center, const vec &surface, float radi
 // worldio
 extern bool load_world(const char *mname, const char *cname = NULL);
 extern bool save_world(const char *mname, bool nolms = false);
+#ifdef STANDALONE
+extern void setservermapfile(const char *f); // dedicated server: target for load_world/save_world
+#endif
 extern void fixmapname(char *name);
 extern void getmapfilenames(const char *fname, const char *cname, char *pakname, char *mapname, char *cfgname);
 extern uint getmapcrc();

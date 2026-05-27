@@ -228,6 +228,7 @@ namespace server
         int mapcrc;
         bool warned, gameclip;
         ENetPacket *getdemo, *getmap, *clipboard;
+        editinfo *edit;          // server-side copy/paste buffer for applying coop edits to its octree
         int lastclipboard, needclipboard;
         int connectauth;
         uint authreq;
@@ -236,8 +237,8 @@ namespace server
         int authkickvictim;
         char *authkickreason;
 
-        clientinfo() : getdemo(NULL), getmap(NULL), clipboard(NULL), authchallenge(NULL), authkickreason(NULL) { reset(); }
-        ~clientinfo() { events.deletecontents(); cleanclipboard(); cleanauth(); }
+        clientinfo() : getdemo(NULL), getmap(NULL), clipboard(NULL), edit(NULL), authchallenge(NULL), authkickreason(NULL) { reset(); }
+        ~clientinfo() { events.deletecontents(); cleanclipboard(); cleanauth(); freeeditinfo(edit); }
 
         void addevent(gameevent *e)
         {
@@ -791,6 +792,7 @@ namespace server
     string pendingmap = "";                  // map restored at startup, applied on first connect
     int pendingmode = 1;                     // gamemode for the restored map (1 = coop edit)
     bool havependingmap = false;
+    bool serverhasmap = false;               // the server holds a live octree it can edit/save
 
     void updatemapdatacrc();
 
@@ -868,12 +870,42 @@ namespace server
         delete f;
     }
 
+    // Octree map maintenance is a dedicated-server feature. On a listen server the host's
+    // client owns the world, so these are no-ops there (serverhasmap stays false, which
+    // gates the edit application below).
+
+    // load the stored map file into the server's live octree (worldroot/worldsize/ents).
+    bool serverloadmap()
+    {
+#ifdef STANDALONE
+        if(!servermappath[0]) return false;
+        setservermapfile(servermappath);
+        serverhasmap = load_world(servermappath, NULL); // servermapfile override ignores the arg
+        return serverhasmap;
+#else
+        return false;
+#endif
+    }
+
+    // serialize the live octree back to the stored map file (nolms: no lightmaps/pvs/etc.).
+    bool serversavemap()
+    {
+#ifdef STANDALONE
+        if(!serverhasmap || !servermappath[0]) return false;
+        setservermapfile(servermappath);
+        return save_world(servermappath, true);
+#else
+        return false;
+#endif
+    }
+
+    // ensure the disk file + mapdata send-buffer + crc reflect the live octree; persists
+    // only when the octree actually changed (mapdatadirty) since the last serialize.
     bool persistcurrentmap()
     {
-        if(!persistmaps || !mapdata) return false;
-        if(!saveservermap()) return false;
-        updatemapdatacrc();
-        mapdatadirty = false;
+        if(!persistmaps || !serverhasmap || !mapdatadirty) return false;
+        if(!serversavemap()) return false;
+        loadservermap();        // disk -> mapdata send-buffer (also recomputes crc, clears dirty)
         lastmapsavetime = totalmillis;
         logoutf("saved server map to \"%s\"", servermappath);
         return true;
@@ -882,10 +914,12 @@ namespace server
     void loadstartupmap()
     {
         if(!persistmaps) return;
-        if(!loadservermap()) return; // sets mapdataname (basename) + mapdatacrc
+        if(!serverloadmap()) return;     // disk -> live octree
+        loadservermap();                 // disk -> mapdata send-buffer + crc
         copystring(pendingmap, mapdataname);
         pendingmode = 1; // coop edit
         havependingmap = true;
+        mapdatadirty = false;
         logoutf("restored server map from \"%s\" as \"%s\"", servermappath, mapdataname);
     }
 
@@ -3030,11 +3064,16 @@ namespace server
         if(!mapdata) { sendf(sender, 1, "ris", N_SERVMSG, "failed to open temporary file for map"); return; }
         mapdata->write(data, len);
         copystring(mapdataname, smapname);
-        mapdatadirty = true;
+        mapdatadirty = false;
         mapdatacrc = 0;
-        // persist right away so the stored copy (and its crc, used for auto-send) is current.
-        // single stored map: not gated on a map name (which is empty after /newmap).
-        if(persistmaps) persistcurrentmap();
+        // a /sendmap seeds/replaces the server's map: persist the upload to disk and load
+        // it into the live octree so subsequent edits apply on top of it.
+        if(persistmaps)
+        {
+            saveservermap();    // mapdata (upload) -> servermappath
+            serverloadmap();    // servermappath -> live octree
+            updatemapdatacrc();
+        }
         sendservmsgf("[%s sent a map to server, \"/getmap\" to receive it]", colorname(ci));
     }
 
@@ -3278,6 +3317,8 @@ namespace server
                 getstring(text, p);
                 int crc = getint(p);
                 if(!ci) break;
+                // make sure the send-buffer reflects the latest applied edits before deciding.
+                if(mapdatadirty) persistcurrentmap();
                 // auto-send the server's single stored map to a joining/mismatched client
                 // so they don't have to /getmap; whenever we have a stored map (valid crc)
                 // and the client's loaded map differs from it. Name-independent.
@@ -3518,11 +3559,17 @@ namespace server
             case N_EDITENT:
             {
                 int i = getint(p);
-                loopk(3) getint(p);
+                int ex = getint(p), ey = getint(p), ez = getint(p);
                 int type = getint(p);
-                loopk(5) getint(p);
+                int a1 = getint(p), a2 = getint(p), a3 = getint(p), a4 = getint(p), a5 = getint(p);
                 if(!ci || ci->state.state==CS_SPECTATOR) break;
                 QUEUE_MSG;
+                // apply to the server's octree entity list (this is what save_world writes)
+                if(serverhasmap && m_edit)
+                {
+                    mpeditent(i, vec(ex/DMF, ey/DMF, ez/DMF), type, a1, a2, a3, a4, a5, false);
+                    mapdatadirty = true;
+                }
                 bool canspawn = canspawnitem(type);
                 if(i<MAXENTS && (sents.inrange(i) || canspawnitem(type)))
                 {
@@ -3712,6 +3759,16 @@ namespace server
                     resetitems();
                     notgotitems = false;
                     if(smode) smode->newmap();
+#ifdef STANDALONE
+                    if(m_edit)
+                    {
+                        // build the server's own blank octree so it can track edits on it
+                        setservermapfile(servermappath);
+                        emptymap(size, true, NULL, true);
+                        serverhasmap = true;
+                        mapdatadirty = true;
+                    }
+#endif
                 }
                 QUEUE_MSG;
                 break;
@@ -3817,15 +3874,6 @@ namespace server
                 break;
             }
 
-            case N_COPY:
-                ci->cleanclipboard();
-                ci->lastclipboard = totalmillis ? totalmillis : 1;
-                goto genericmsg;
-
-            case N_PASTE:
-                if(ci->state.state!=CS_SPECTATOR) sendclipboard(ci);
-                goto genericmsg;
-    
             case N_CLIPBOARD:
             {
                 int unpacklen = getint(p), packlen = getint(p); 
@@ -3851,20 +3899,82 @@ namespace server
                 break;
             } 
 
+            case N_EDITF:
             case N_EDITT:
+            case N_EDITM:
+            case N_FLIP:
+            case N_COPY:
+            case N_PASTE:
+            case N_ROTATE:
             case N_REPLACE:
+            case N_DELCUBE:
             case N_EDITVSLOT:
             {
-                int size = server::msgsizelookup(type);
-                if(size<=0) { disconnect_client(sender, DISC_MSGERR); return; }
-                loopi(size-1) getint(p);
-                if(p.remaining() < 2) { disconnect_client(sender, DISC_MSGERR); return; }
-                int extra = lilswap(*(const ushort *)p.pad(2));
-                if(p.remaining() < extra) { disconnect_client(sender, DISC_MSGERR); return; }
-                p.pad(extra);
-                if(ci && ci->state.state!=CS_SPECTATOR) QUEUE_MSG;
+                // Parse the selection + per-type args exactly like the client does when it
+                // receives a remote edit, and apply it to the server's own octree so the
+                // server map tracks edits live. Then relay to the other clients (QUEUE_MSG).
+                selinfo sel;
+                sel.o.x = getint(p); sel.o.y = getint(p); sel.o.z = getint(p);
+                sel.s.x = getint(p); sel.s.y = getint(p); sel.s.z = getint(p);
+                sel.grid = getint(p); sel.orient = getint(p);
+                sel.cx = getint(p); sel.cxs = getint(p); sel.cy = getint(p); sel.cys = getint(p);
+                sel.corner = getint(p);
+                bool canedit = ci && serverhasmap && m_edit && ci->state.state != CS_SPECTATOR, changed = false;
+                switch(type)
+                {
+                    case N_EDITF: { int dir = getint(p), mode = getint(p); if(canedit && sel.validate()) { mpeditface(dir, mode, sel, false); changed = true; } break; }
+                    case N_EDITT:
+                    {
+                        int tex = getint(p), allfaces = getint(p);
+                        if(p.remaining() < 2) { disconnect_client(sender, DISC_MSGERR); return; }
+                        int extra = lilswap(*(const ushort *)p.pad(2));
+                        if(p.remaining() < extra) { disconnect_client(sender, DISC_MSGERR); return; }
+                        ucharbuf ebuf = p.subbuf(extra);
+                        if(canedit && sel.validate()) { mpedittex(tex, allfaces, sel, ebuf); changed = true; }
+                        break;
+                    }
+                    case N_EDITM: { int mat = getint(p), filter = getint(p); if(canedit && sel.validate()) { mpeditmat(mat, filter, sel, false); changed = true; } break; }
+                    case N_FLIP: if(canedit && sel.validate()) { mpflip(sel, false); changed = true; } break;
+                    case N_COPY:
+                        if(ci) { ci->cleanclipboard(); ci->lastclipboard = totalmillis ? totalmillis : 1; }
+                        if(canedit && sel.validate()) mpcopy(ci->edit, sel, false);
+                        break;
+                    case N_PASTE:
+                        if(ci && ci->state.state != CS_SPECTATOR) sendclipboard(ci);
+                        if(canedit && sel.validate()) { mppaste(ci->edit, sel, false); changed = true; }
+                        break;
+                    case N_ROTATE: { int dir = getint(p); if(canedit && sel.validate()) { mprotate(dir, sel, false); changed = true; } break; }
+                    case N_REPLACE:
+                    {
+                        int oldtex = getint(p), newtex = getint(p), insel = getint(p);
+                        if(p.remaining() < 2) { disconnect_client(sender, DISC_MSGERR); return; }
+                        int extra = lilswap(*(const ushort *)p.pad(2));
+                        if(p.remaining() < extra) { disconnect_client(sender, DISC_MSGERR); return; }
+                        ucharbuf ebuf = p.subbuf(extra);
+                        if(canedit && sel.validate()) { mpreplacetex(oldtex, newtex, insel>0, sel, ebuf); changed = true; }
+                        break;
+                    }
+                    case N_DELCUBE: if(canedit && sel.validate()) { mpdelcube(sel, false); changed = true; } break;
+                    case N_EDITVSLOT:
+                    {
+                        int delta = getint(p), allfaces = getint(p);
+                        if(p.remaining() < 2) { disconnect_client(sender, DISC_MSGERR); return; }
+                        int extra = lilswap(*(const ushort *)p.pad(2));
+                        if(p.remaining() < extra) { disconnect_client(sender, DISC_MSGERR); return; }
+                        ucharbuf ebuf = p.subbuf(extra);
+                        if(canedit && sel.validate()) { mpeditvslot(delta, allfaces, sel, ebuf); changed = true; }
+                        break;
+                    }
+                }
+                if(changed) mapdatadirty = true;
+                if(ci && ci->state.state != CS_SPECTATOR) QUEUE_MSG;
                 break;
             }
+
+            case N_REMIP:
+                if(ci && serverhasmap && m_edit && ci->state.state != CS_SPECTATOR) { mpremip(false); mapdatadirty = true; }
+                if(ci && ci->state.state != CS_SPECTATOR) QUEUE_MSG;
+                break;
 
             case N_UNDO:
             case N_REDO:

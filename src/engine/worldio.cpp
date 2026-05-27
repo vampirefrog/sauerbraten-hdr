@@ -176,8 +176,24 @@ string ogzname, bakname, cfgname, picname;
 
 VARP(savebak, 0, 2, 2);
 
+#ifdef STANDALONE
+// The dedicated server stores its one map at an explicit path (servermappath) rather than
+// under packages/. When set, load_world/save_world target it directly.
+string servermapfile = "";
+void setservermapfile(const char *f) { copystring(servermapfile, f ? f : ""); }
+#endif
+
 void setmapfilenames(const char *fname, const char *cname = NULL)
 {
+#ifdef STANDALONE
+    if(servermapfile[0])
+    {
+        copystring(ogzname, servermapfile);
+        path(ogzname);
+        bakname[0] = cfgname[0] = picname[0] = '\0';
+        return;
+    }
+#endif
     string pakname, mapname, mcfgname;
     getmapfilenames(fname, cname, pakname, mapname, mcfgname);
 
