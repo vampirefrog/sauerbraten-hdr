@@ -3075,7 +3075,17 @@ namespace server
             serverloadmap();    // servermappath -> live octree
             updatemapdatacrc();
         }
-        sendservmsgf("[%s sent a map to server, \"/getmap\" to receive it]", colorname(ci));
+        else updatemapdatacrc();
+        // push the freshly-uploaded map to everyone else (they're already on this map name from the /map change,
+        // with an empty/local copy) -- so they don't have to /getmap. The sender already has it.
+        loopv(clients)
+        {
+            clientinfo *e = clients[i];
+            if(!e->connected || e->clientnum == sender || e->getmap) continue;
+            if((e->getmap = sendfile(e->clientnum, 2, mapdata, "ri", N_SENDMAP)))
+                e->getmap->freeCallback = freegetmap;
+        }
+        sendservmsgf("[%s sent a map to the server]", colorname(ci));
     }
 
     void sendclipboard(clientinfo *ci)
@@ -3320,10 +3330,12 @@ namespace server
                 if(!ci) break;
                 // make sure the send-buffer reflects the latest applied edits before deciding.
                 if(mapdatadirty) persistcurrentmap();
-                // auto-send the server's single stored map to a joining/mismatched client
-                // so they don't have to /getmap; whenever we have a stored map (valid crc)
-                // and the client's loaded map differs from it. Name-independent.
-                if(m_edit && mapdata && mapdatacrc && !ci->getmap && (uint)crc != mapdatacrc)
+                // auto-send the server's stored map to a joining/mismatched client so they don't have to
+                // /getmap -- but ONLY when the stored map is the CURRENT map (mapdataname == smapname). After
+                // someone changes the map (/map x), the stored data is for the old map, so we must NOT push it
+                // back (that would revert the changer's fresh local load). It gets (re)served once a /sendmap
+                // seeds the new map's data below.
+                if(m_edit && mapdata && mapdatacrc && !ci->getmap && (uint)crc != mapdatacrc && !strcmp(mapdataname, smapname))
                 {
                     if((ci->getmap = sendfile(ci->clientnum, 2, mapdata, "ri", N_SENDMAP)))
                         ci->getmap->freeCallback = freegetmap;
