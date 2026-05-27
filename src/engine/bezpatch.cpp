@@ -47,10 +47,20 @@ void bezpatch::tessellate()
         n.cross(tu, tv);
         norms.add(n.iszero() ? vec(0, 0, 1) : n.normalize());
         verts.add(pos);
-        tcs.add(vec2(gu, gv));
+        tcs.add(vec2(0, 0));   // filled below with world arc length
     }
 
     int stride = su+1;
+    // natural (arc-length) texture coords in world units: distance along u (row 0) and v (col 0),
+    // so texel density stays uniform regardless of patch size/curvature.
+    loopj(sv+1) loopi(su+1)
+    {
+        float s = 0, t = 0;
+        loopk(i) s += verts[j*stride + k+1].dist(verts[j*stride + k]);
+        loopk(j) t += verts[(k+1)*stride + i].dist(verts[k*stride + i]);
+        tcs[j*stride + i] = vec2(s, t);
+    }
+
     loopj(sv) loopi(su)
     {
         ushort a = j*stride + i, b = a+1, c = a+stride, d = c+1;
@@ -119,6 +129,13 @@ void loadworldpatches(stream *f)
 
 #ifndef STANDALONE
 
+extern int currentedittex();   // octaedit.cpp: editor's current texture (declared locally, like entdrag)
+
+// edit state (defined up here so the creation commands can reference them)
+int patchhover = -1, patchhovercp = -1;   // patch + control-point index under the crosshair
+int patchorient = 0;                       // box face under the crosshair (like entorient)
+int patchmoving = 0;                       // 0 idle, 1 first drag frame, 2 dragging
+
 // ---- creation -------------------------------------------------------------
 
 VARP(patchtess, 1, 4, 16);   // default subdivision level for new patches
@@ -130,6 +147,7 @@ ICOMMAND(newpatch, "i", (int *size),
     vec center = vec(camdir).mul(48).add(camera1->o);   // in front of the camera
     bezpatch *p = new bezpatch;
     p->tess = patchtess;
+    p->vslot = currentedittex();                        // adopt the editor's current texture
     loop(y, 3) loop(x, 3)                                // flat horizontal 3x3 patch
         p->cp(x, y) = vec(center.x + (x-1)*0.5f*s, center.y + (y-1)*0.5f*s, center.z);
     p->dirty = true;
@@ -147,27 +165,51 @@ ICOMMAND(clearpatches, "", (),
 
 ICOMMAND(patchcount, "", (), { conoutf("%d patches", patches.length()); intret(patches.length()); });
 
-// ---- rendering (flat-shaded solid + control-point handles in edit mode) -----
+// assign the editor's current texture/material to the hovered (or last) patch
+ICOMMAND(patchsettex, "", (),
+{
+    if(noedit(true)) return;
+    bezpatch *p = patches.inrange(patchhover) ? patches[patchhover] : (patches.empty() ? NULL : patches.last());
+    if(!p) { conoutf("no patch"); return; }
+    p->vslot = currentedittex();
+    conoutf("patch texture set to %d", p->vslot);
+});
+
+// ---- rendering ------------------------------------------------------------
 
 void renderpatchhandles();
+extern int currentedittex();
+
+VARP(patchtexscale, 1, 32, 512);   // world units per texture tile (before the slot's own scale)
 
 void renderpatches()
 {
     if(patches.empty()) return;
     loopv(patches) if(patches[i]->dirty) patches[i]->tessellate();
 
-    glDisable(GL_CULL_FACE);     // patches are two-sided until normals/culling settle in later phases
+    glDisable(GL_CULL_FACE);     // patches are two-sided until per-face culling settles in a later phase
     glDisable(GL_BLEND);
-    notextureshader->set();
+    SETSHADER(texture);          // built-in: gl_FragColor = vcolor * texture2D(tex0, texcoord0)
     gle::defvertex();
+    gle::deftexcoord0();
 
-    gle::colorub(150, 150, 160);
     loopv(patches)
     {
         bezpatch *p = patches[i];
         if(p->tris.empty()) continue;
+        VSlot &vs = lookupvslot(p->vslot, true);
+        Slot &s = *vs.slot;
+        Texture *t = s.sts.inrange(0) ? s.sts[0].t : notexture;
+        glBindTexture(GL_TEXTURE_2D, t->id);
+        float inv = 1.0f / (patchtexscale * (vs.scale > 0 ? vs.scale : 1));
+        gle::color(vec(vs.colorscale).mul(0.8f));   // flat-lit until lightmaps land (phase 5)
         gle::begin(GL_TRIANGLES);
-        loopvj(p->tris) gle::attrib(p->verts[p->tris[j]]);
+        loopvj(p->tris)
+        {
+            ushort idx = p->tris[j];
+            gle::attrib(p->verts[idx]);
+            gle::attrib(vec2(p->tcs[idx]).mul(inv));
+        }
         xtraverts += gle::end();
     }
 
@@ -185,10 +227,6 @@ extern void boxs(int orient, vec o, const vec &s, float size);
 extern int entselradius;   // world.cpp: size of an entity position marker; control points match it
 extern int entselsnap;
 extern selinfo sel;
-
-int patchhover = -1, patchhovercp = -1;   // patch + control-point index under the crosshair
-int patchorient = 0;                       // box face under the crosshair (like entorient)
-int patchmoving = 0;                       // 0 idle, 1 first drag frame, 2 dragging
 
 // the axis-aligned box that represents a control-point handle (identical to an entity marker box)
 static void cpbox(const vec &c, vec &eo, vec &es)

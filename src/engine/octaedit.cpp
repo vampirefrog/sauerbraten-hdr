@@ -2557,6 +2557,14 @@ void getseltex()
     intret(c.texture[sel.orient]);
 }
 
+// currently-selected editor texture (vslot index), for non-cube geometry like bezier patches
+int currentedittex()
+{
+    filltexlist();
+    int i = curtexindex < 0 ? 0 : curtexindex;
+    return texmru.inrange(i) ? texmru[i] : 0;
+}
+
 void gettexname(int *tex, int *subslot)
 {
     if(noedit(true) || *tex<0) return;
