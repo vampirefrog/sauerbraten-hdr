@@ -1,0 +1,54 @@
+// bezpatch.h: Quake3-style bezier patches (clean-room implementation).
+//
+// A patch is a grid of (cols x rows) control points, both dimensions odd (3,5,7,...).
+// It is composed of ((cols-1)/2) x ((rows-1)/2) biquadratic (3x3) Bezier sub-patches that
+// share edge control points, exactly like the patches GtkRadiant edits for Quake3.
+// The control mesh is tessellated into a triangle mesh for rendering, lightmapping and collision.
+
+#ifndef __BEZPATCH_H__
+#define __BEZPATCH_H__
+
+struct bezpatch
+{
+    int cols, rows;          // control-point grid dimensions (odd, >=3)
+    vector<vec> ctrl;        // cols*rows control points, row-major (index = y*cols + x)
+    int vslot;               // texture/material slot index (as in cube.texture[])
+    int tess;                // subdivision segments per sub-patch axis (>=1)
+
+    // tessellated mesh, rebuilt lazily when dirty
+    vector<vec> verts;       // positions
+    vector<vec> norms;       // normals
+    vector<vec2> tcs;        // natural-parameter texture coords (sub-patch units)
+    vector<ushort> tris;     // triangle indices into verts/norms/tcs
+    bool dirty;
+
+    bezpatch() : cols(0), rows(0), vslot(0), tess(4), dirty(true) { setdims(3, 3); }
+
+    vec &cp(int x, int y) { return ctrl[y*cols + x]; }
+    const vec &cp(int x, int y) const { return ctrl[y*cols + x]; }
+
+    void setdims(int c, int r)         // (re)size the control grid, preserving overlapping points
+    {
+        vector<vec> old; old.move(ctrl);
+        int oc = cols, orr = rows;
+        cols = c; rows = r;
+        ctrl.setsize(0);
+        loop(y, rows) loop(x, cols)
+            ctrl.add(x < oc && y < orr ? old[y*oc + x] : vec(0, 0, 0));
+        dirty = true;
+    }
+
+    int usub() const { return (cols-1)/2; }   // sub-patches along u
+    int vsub() const { return (rows-1)/2; }    // sub-patches along v
+
+    void evalsubpatch(int iu, int iv, float u, float v, vec &pos, vec &du, vec &dv) const;
+    void tessellate();
+    void boundsphere(vec &center, float &radius) const;
+};
+
+extern vector<bezpatch *> patches;
+
+extern void clearpatches();
+extern void renderpatches();
+
+#endif

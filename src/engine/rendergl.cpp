@@ -1912,6 +1912,8 @@ void gl_drawframe()
 
     rendergeom(causticspass);
 
+    renderpatches();
+
     extern int outline;
     if(!wireframe && editmode && outline) renderoutline();
 

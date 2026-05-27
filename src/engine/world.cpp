@@ -1246,6 +1246,7 @@ void resetmap()
     pruneundos();
     clearmapcrc();
     clearextramapvars();
+    clearpatches();
 
     entities::clearents();
     outsideents.setsize(0);

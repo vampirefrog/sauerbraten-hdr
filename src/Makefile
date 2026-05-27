@@ -96,6 +96,7 @@ CLIENT_OBJS= \
 	engine/glare.o \
 	engine/hdr.o \
 	engine/lightprobes.o \
+	engine/bezpatch.o \
 	engine/grass.o \
 	engine/lightmap.o \
 	engine/main.o \

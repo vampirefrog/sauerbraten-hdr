@@ -32,6 +32,7 @@ extern int smoothangle(int id, int angle); // normal.cpp; no-op on server (smoot
 #include "bih.h"
 #include "texture.h"
 #include "model.h"
+#include "bezpatch.h"
 #endif
 
 // Declarations below are shared between the client and the dedicated server. The server
