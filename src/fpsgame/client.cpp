@@ -2140,7 +2140,7 @@ namespace game
         if(map)
         {
             stream::offset len = map->size();
-            if(len > 4*1024*1024) conoutf(CON_ERROR, "map is too large");
+            if(len > 64*1024*1024) conoutf(CON_ERROR, "map is too large"); // server enforces its own maxsendmapsize
             else if(len <= 0) conoutf(CON_ERROR, "could not read map");
             else
             {

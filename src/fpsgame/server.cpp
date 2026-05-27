@@ -784,6 +784,7 @@ namespace server
     SVARP(servermappath, "map.ogz");         // the one stored map file (relative to home dir)
     VARP(persistmaps, 0, 1, 1);              // master switch for the whole feature
     VARP(mapsaveinterval, 0, 180, 3600);     // seconds between periodic autosaves (0 = off)
+    VAR(maxsendmapsize, 1, 4, 64);           // max /sendmap upload the server accepts, in MB
 
     string mapdataname = "";                 // name of the map currently held in mapdata
     uint mapdatacrc = 0;                      // crc of mapdata's decompressed contents (0 = unknown)
@@ -3056,7 +3057,7 @@ namespace server
 
     void receivefile(int sender, uchar *data, int len)
     {
-        if(!m_edit || len <= 0 || len > 4*1024*1024) return;
+        if(!m_edit || len <= 0 || len > (maxsendmapsize<<20)) return;
         clientinfo *ci = getinfo(sender);
         if(ci->state.state==CS_SPECTATOR && !ci->privilege && !ci->local) return;
         if(mapdata) DELETEP(mapdata);
