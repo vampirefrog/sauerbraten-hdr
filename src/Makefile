@@ -153,6 +153,11 @@ SERVER_OBJS= \
 	engine/command-standalone.o \
 	engine/server-standalone.o \
 	engine/worldio-standalone.o \
+	engine/octa-standalone.o \
+	engine/world-standalone.o \
+	engine/octaedit-standalone.o \
+	engine/texture-standalone.o \
+	engine/serverengine-standalone.o \
 	fpsgame/entities-standalone.o \
 	fpsgame/server-standalone.o
 

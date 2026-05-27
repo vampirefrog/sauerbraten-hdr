@@ -1,8 +1,8 @@
 // glstub.h: minimal OpenGL type/constant stubs for the STANDALONE (dedicated server)
-// build, which has no GL headers. The dedicated server compiles the octree/edit engine
-// (octa/world/octaedit) to maintain a real server-side map, but never renders, so the
-// GL types here exist only so the shared data-structure headers (octa.h, texture.h)
-// parse. No GL functions are linked; all rendering call sites are guarded out.
+// build, which has no GL headers. The dedicated server compiles the octree/edit/texture
+// engine to maintain a real server-side map, but never renders, so the GL types here
+// exist only so the shared data-structure headers (octa.h, texture.h) parse. The actual
+// rendering/GL call sites in those files are guarded out with #ifndef STANDALONE.
 
 #ifndef __GLSTUB_H__
 #define __GLSTUB_H__
@@ -16,7 +16,7 @@ typedef unsigned char GLboolean;
 typedef float GLfloat;
 typedef void GLvoid;
 
-// canonical GL enum values (only used as type tags by shader-param bookkeeping)
+// GL enum values referenced by the data-structure headers / surviving (non-guarded) code.
 #define GL_FALSE 0
 #define GL_TRUE 1
 #define GL_FLOAT 0x1406
@@ -39,8 +39,8 @@ typedef void GLvoid;
 #define GL_TEXTURE_2D 0x0DE1
 
 // GL extension function pointers referenced by inline shader-param methods in texture.h.
-// Declared variadic so those bodies parse; defined NULL in serverstubs.cpp. They are
-// never actually invoked on the server (no rendering), so the NULLs are never called.
+// Declared variadic so those bodies parse; defined NULL in serverengine.cpp. Never invoked
+// on the server (no rendering), so the NULLs are never called.
 #define GLSTUB_FNPTR(name) extern void (*name)(...);
 GLSTUB_FNPTR(glUniform1f_)  GLSTUB_FNPTR(glUniform2f_)  GLSTUB_FNPTR(glUniform3f_)  GLSTUB_FNPTR(glUniform4f_)
 GLSTUB_FNPTR(glUniform1i_)  GLSTUB_FNPTR(glUniform2i_)  GLSTUB_FNPTR(glUniform3i_)  GLSTUB_FNPTR(glUniform4i_)

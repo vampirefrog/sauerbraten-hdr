@@ -1,13 +1,19 @@
 // texture.cpp: texture slot management
 
 #include "engine.h"
+#ifndef STANDALONE
 #include "SDL_image.h"
 
 #ifndef SDL_IMAGE_VERSION_ATLEAST
 #define SDL_IMAGE_VERSION_ATLEAST(X, Y, Z) \
     (SDL_VERSIONNUM(SDL_IMAGE_MAJOR_VERSION, SDL_IMAGE_MINOR_VERSION, SDL_IMAGE_PATCHLEVEL) >= SDL_VERSIONNUM(X, Y, Z))
 #endif
+#endif
 
+// Image loading, GL texture creation/upload, and texture commands are rendering-only and
+// guarded out of the dedicated server, which keeps only the slot/VSlot bookkeeping below
+// (needed to read/write the texture table when loading and saving maps).
+#ifndef STANDALONE
 template<int BPP> static void halvetexture(uchar * RESTRICT src, uint sw, uint sh, uint stride, uchar * RESTRICT dst)
 {
     for(uchar *yend = &src[sh*stride]; src < yend;)
@@ -1644,6 +1650,7 @@ bool settexture(const char *name, int clamp)
     glBindTexture(GL_TEXTURE_2D, t->id);
     return t != notexture;
 }
+#endif
 
 vector<VSlot *> vslots;
 vector<Slot *> slots;
@@ -2288,6 +2295,7 @@ void texsmooth(int *id, int *angle)
 COMMAND(texsmooth, "ib");
 ICOMMAND(getvsmooth, "i", (int *tex), intret(lookupvslot(*tex, false).slot->smooth));
 
+#ifndef STANDALONE
 static int findtextype(Slot &s, int type, int last = -1)
 {
     for(int i = last+1; i<s.sts.length(); i++) if((type&(1<<s.sts[i].type)) && s.sts[i].combined<0) return i;
@@ -2411,9 +2419,11 @@ static void texcombine(Slot &s, int index, Slot::Tex &t, bool forceload = false)
     }
     t.t = newtexture(NULL, key.getbuf(), ts, wrap, true, true, true, compress);
 }
+#endif
 
 static Slot &loadslot(Slot &s, bool forceload)
 {
+#ifndef STANDALONE
     linkslotshader(s);
     loopv(s.sts)
     {
@@ -2430,6 +2440,7 @@ static Slot &loadslot(Slot &s, bool forceload)
                 break;
         }
     }
+#endif
     s.loaded = true;
     return s;
 }
@@ -2465,6 +2476,9 @@ VSlot &lookupvslot(int index, bool load)
     return s;
 }
 
+// everything below is texture/shader/thumbnail/screenshot/GL rendering, guarded out of
+// the server build (loadthumbnail is stubbed in serverengine.cpp).
+#ifndef STANDALONE
 void linkslotshaders()
 {
     loopv(slots) if(slots[i]->loaded) linkslotshader(*slots[i]);
@@ -3856,3 +3870,5 @@ void mergenormalmaps(char *heightfile, char *normalfile) // jpg/png/tga + tga ->
 COMMAND(flipnormalmapy, "ss");
 COMMAND(mergenormalmaps, "ss");
 
+
+#endif

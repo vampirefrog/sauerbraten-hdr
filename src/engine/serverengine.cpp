@@ -122,4 +122,100 @@ void initlights() {}
 void clearlightcache(int id) {}
 void resetlightmaps(bool fullclean) {}
 
+// --- globals referenced by the octree/edit code; inert on the server.
+dynent *player = NULL;
+physent *camera1 = NULL;
+bool inbetweenframes = false, renderedframe = true;
+int hidehud = 0;
+int mainmenu = 0;
+int blendpaintmode = 0;
+int usegui2d = 0, menuautoclose = 0;
+vec worldpos(0, 0, 0), camdir(0, 0, 0), camright(0, 0, 0), camup(0, 0, 0);
+vector<vtxarray *> varoot, valist;
+
+// --- vertex-array / render / pvs / blob / decal / sound / menu / pfx no-ops.
+void allchanged(bool) {}
+void octarender() {}
+void destroyva(vtxarray *, bool) {}
+void updatevabb(vtxarray *, bool) {}
+void updatevabbs(bool) {}
+void resetclipplanes() {}
+void guessnormals(const vec *, int, vec *) {}
+void reduceslope(ivec &) {}
+int isvisiblesphere(float, const vec &) { return 0; }
+void cleanreflections() {}
+void cleardamagescreen() {}
+void cleardecals() {}
+void clearmainmenu() {}
+void clearmapsounds() {}
+void clearparticles() {}
+void clearpvs() {}
+void clearsleep(bool) {}
+void invalidatepostfx() {}
+void keyrepeat(bool, int) {}
+void resetblobs() {}
+void resetblendmap() {}
+void enlargeblendmap() {}
+void shrinkblendmap(int) {}
+void stoppaintblendmap() {}
+void trypaintblendmap() {}
+void setupmaterials(int, int) {}
+int findmaterial(const char *) { return -1; }
+const char *getmaterialdesc(int, const char *) { return ""; }
+bool printparticles(extentity &, char *, int) { return false; }
+bool isconnected(bool, bool) { return false; }
+bool multiplayer(bool) { return false; }
+void dropenttofloor(entity *) {}
+bool entinmap(dynent *, bool) { return true; }
+vec menuinfrontofplayer() { return vec(0, 0, 0); }
+void g3d_addgui(g3d_callback *, vec &, int) {}
+void clearmapcrc() {}
+
+// --- game callbacks invoked by the octree/edit code. On the server, edits arrive over
+// the network and are applied with local=false, so the local-only hooks (edittrigger,
+// etc.) do nothing; map lifecycle is driven by server::changemap instead.
+namespace game
+{
+    bool allowedittoggle() { return true; }
+    void edittoggled(bool) {}
+    void forceedit(const char *) {}
+    void edittrigger(const selinfo &, int, int, int, int, const VSlot *) {}
+    const char *getclientmap() { return ""; }
+    void resetgamestate() {}
+    float ratespawn(dynent *, const extentity &) { return 1.0f; }
+    void newmap(int) {}
+    void startmap(const char *) {}
+}
+
+// --- texture / VSlot / shader symbols. texture.cpp's VSlot management IS compiled into
+// the server; these are the render-only entry points it and the octree/worldio code
+// reference but that have no meaning headless. getshaderparamname is the real one (VSlot
+// param dedup in comparevslot compares interned name pointers); the rest are no-ops.
+Texture *notexture = NULL;
+Shader *hudshader = NULL;
+Shader *Shader::lastshader = NULL;
+int smoothangle(int, int) { return 0; }
+Texture *loadthumbnail(Slot &) { return notexture; }
+void Shader::allocparams(Slot *) {}
+void Shader::bindprograms() {}
+bool Shader::isnull(const Shader *s) { return !s; }
+Shader *useshaderbyname(const char *) { return NULL; }
+void resetslotshader() {}
+void setslotshader(Slot &) {}
+void linkvslotshader(VSlot &, bool) {}
+
+static hashset<const char *> shaderparamnames(256);
+const char *getshaderparamname(const char *name, bool insert)
+{
+    const char *exists = shaderparamnames.find(name, NULL);
+    if(exists || !insert) return exists;
+    return shaderparamnames.add(newstring(name));
+}
+
+const texrotation texrotations[8] =
+{
+    { false, false, false }, { false,  true,  true }, {  true,  true, false }, {  true, false,  true },
+    {  true, false, false }, { false,  true, false }, { false, false,  true }, {  true,  true,  true },
+};
+
 #endif

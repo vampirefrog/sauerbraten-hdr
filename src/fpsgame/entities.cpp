@@ -705,5 +705,41 @@ namespace entities
         return 4.0f;
     }
 #endif
+
+#ifdef STANDALONE
+    // Minimal server-side entity interface. The dedicated server keeps the real entity
+    // list (it is what save_world writes), but has no rendering, models, or local player,
+    // so the editing/gameplay hooks the engine calls are no-ops here. Entity attributes
+    // arrive complete over the network and are applied directly to the list.
+    vector<extentity *> ents;
+    vector<extentity *> &getents() { return ents; }
+    bool mayattach(extentity &) { return false; }
+    bool attachent(extentity &, extentity &) { return false; }
+    const char *entmodel(const entity &) { return NULL; }
+    extentity *newentity() { return new fpsentity(); }
+    void deleteentity(extentity *e) { delete (fpsentity *)e; }
+    void clearents() { while(ents.length()) deleteentity(ents.pop()); }
+    void fixentity(extentity &) {}
+    bool printent(extentity &, char *, int) { return false; }
+    const char *entnameinfo(entity &) { return ""; }
+    const char *entname(int i)
+    {
+        static const char * const entnames[] =
+        {
+            "none?", "light", "mapmodel", "playerstart", "envmap", "particles", "sound", "spotlight",
+            "shells", "bullets", "rockets", "riflerounds", "grenades", "cartridges",
+            "health", "healthboost", "greenarmour", "yellowarmour", "quaddamage",
+            "teleport", "teledest",
+            "monster", "carrot", "jumppad",
+            "base", "respawnpoint",
+            "box", "barrel",
+            "platform", "elevator",
+            "flag",
+            "", "", "", "",
+        };
+        return i>=0 && size_t(i)<sizeof(entnames)/sizeof(entnames[0]) ? entnames[i] : "";
+    }
+    void editent(int i, bool local) {}
+#endif
 }
 

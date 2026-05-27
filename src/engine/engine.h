@@ -20,6 +20,7 @@ extern void setsurface(cube &c, int orient, const surfaceinfo &surf, const verti
 extern void initlights();
 extern void clearlightcache(int id = -1);
 extern void resetlightmaps(bool fullclean = true);
+extern int smoothangle(int id, int angle); // normal.cpp; no-op on server (smoothing is render-only)
 #endif
 
 #ifndef STANDALONE
