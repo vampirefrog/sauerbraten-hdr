@@ -169,7 +169,9 @@ bool loadents(const char *fname, vector<entity> &ents, uint *crc)
     return true;
 }
 
-#ifndef STANDALONE
+// The dedicated server needs load_world/save_world (it keeps a real map), so this region
+// is compiled for STANDALONE too; the client-only pieces inside are individually guarded.
+#if 1
 string ogzname, bakname, cfgname, picname;
 
 VARP(savebak, 0, 2, 2);
@@ -900,9 +902,15 @@ bool save_world(const char *mname, bool nolms)
     hdr.numents = 0;
     const vector<extentity *> &ents = entities::getents();
     loopv(ents) if(ents[i]->type!=ET_EMPTY || nolms) hdr.numents++;
+#ifndef STANDALONE
     hdr.numpvs = nolms ? 0 : getnumviewcells();
     hdr.lightmaps = nolms ? 0 : lightmaps.length();
     hdr.blendmap = shouldsaveblendmap();
+#else
+    hdr.numpvs = 0;
+    hdr.lightmaps = 0;
+    hdr.blendmap = 0;
+#endif
     hdr.numvars = 0;
     hdr.numvslots = numvslots;
     enumerate(idents, ident, id, 
@@ -970,7 +978,10 @@ bool save_world(const char *mname, bool nolms)
     renderprogress(0, "saving octree...");
     savec(worldroot, ivec(0, 0, 0), worldsize>>1, f, nolms);
 
-    if(!nolms) 
+#ifndef STANDALONE
+    // lightmaps/pvs/lightprobes/blendmap: only when saving with baked data. The server
+    // always saves with nolms (it has none of these), so this never runs there.
+    if(!nolms)
     {
         if(lightmaps.length()) renderprogress(0, "saving lightmaps...");
         loopv(lightmaps)
@@ -989,6 +1000,7 @@ bool save_world(const char *mname, bool nolms)
         renderprogress(0, "saving light probes..."); savelightprobes(f);   // MAPVERSION>=34
     }
     if(shouldsaveblendmap()) { renderprogress(0, "saving blendmap..."); saveblendmap(f); }
+#endif
 
     delete f;
     conoutf("wrote map file %s", ogzname);
@@ -1002,7 +1014,11 @@ void clearmapcrc() { mapcrc = 0; }
 
 bool load_world(const char *mname, const char *cname)        // still supports all map formats that have existed since the earliest cube betas!
 {
+#ifdef STANDALONE
+    int loadingstart = totalmillis;
+#else
     int loadingstart = SDL_GetTicks();
+#endif
     setmapfilenames(mname, cname);
     stream *f = opengzfile(ogzname, "rb");
     if(!f) { conoutf(CON_ERROR, "could not read map %s", ogzname); return false; }
@@ -1213,6 +1229,9 @@ bool load_world(const char *mname, const char *cname)        // still supports a
     renderprogress(0, "validating...");
     validatec(worldroot, hdr.worldsize>>1);
 
+#ifndef STANDALONE
+    // lightmaps / pvs / light probes / blendmap follow the octree. The server never has
+    // these (it only deals with nolms maps) and loads only geometry/entities/vslots above.
     if(!failed)
     {
         if(hdr.version >= 7) loopi(hdr.lightmaps)
@@ -1242,11 +1261,16 @@ bool load_world(const char *mname, const char *cname)        // still supports a
         if(hdr.version >= 34) loadlightprobes(f);   // probe section written after pvs, before blendmap
         if(hdr.version >= 28 && hdr.blendmap) loadblendmap(f, hdr.blendmap);
     }
+#endif
 
     mapcrc = f->getcrc();
     delete f;
 
+#ifdef STANDALONE
+    conoutf("read map %s (%.1f seconds)", ogzname, (totalmillis-loadingstart)/1000.0f);
+#else
     conoutf("read map %s (%.1f seconds)", ogzname, (SDL_GetTicks()-loadingstart)/1000.0f);
+#endif
 
     clearmainmenu();
 

@@ -169,7 +169,6 @@ void dropenttofloor(entity *) {}
 bool entinmap(dynent *, bool) { return true; }
 vec menuinfrontofplayer() { return vec(0, 0, 0); }
 void g3d_addgui(g3d_callback *, vec &, int) {}
-void clearmapcrc() {}
 
 // --- game callbacks invoked by the octree/edit code. On the server, edits arrive over
 // the network and are applied with local=false, so the local-only hooks (edittrigger,
@@ -185,7 +184,29 @@ namespace game
     float ratespawn(dynent *, const extentity &) { return 1.0f; }
     void newmap(int) {}
     void startmap(const char *) {}
+    const char *getmapinfo() { return NULL; }
+    void loadingmap(const char *) {}
+    void preload() {}
+    void writegamedata(vector<char> &) {}
+    void readgamedata(vector<char> &) {}
 }
+
+// --- map load/save support: octree normal encoding (real math, used when saving verts),
+// plus no-op stubs for the model/sound/lightmap-fixup steps load_world runs after loading.
+ushort encodenormal(const vec &n)
+{
+    if(n.iszero()) return 0;
+    int yaw = int(-atan2(n.x, n.y)/RAD), pitch = int(asin(n.z)/RAD);
+    return ushort(clamp(pitch + 90, 0, 180)*360 + (yaw < 0 ? yaw%360 + 360 : yaw%360) + 1);
+}
+void fixlightmapnormals() {}
+void fixrotatedlightmaps() {}
+void flushpreloadedmodels(bool) {}
+void preloadusedmapmodels(bool, bool) {}
+void preloadmapsounds() {}
+void renderbackground(const char *, Texture *, const char *, const char *, bool, bool) {}
+Texture *textureload(const char *, int, bool, bool) { extern Texture *notexture; return notexture; }
+bool readva(vtxarray *, ushort *&, vertex *&) { return false; }
 
 // --- texture / VSlot / shader symbols. texture.cpp's VSlot management IS compiled into
 // the server; these are the render-only entry points it and the octree/worldio code
