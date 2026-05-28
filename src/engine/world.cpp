@@ -553,8 +553,22 @@ void entdrag(const vec &ray)
 
     if(entmoving==1) makeundoent();
     groupeditpure(e.o[R[d]] += r; e.o[C[d]] += c);
+#ifndef STANDALONE
+    extern void movepatchgroup(int d, float dr, float dc);   // also drag any selected patch control points
+    movepatchgroup(d, r, c);
+#endif
     entmoving = 2;
 }
+
+// move all selected entities by a delta in the R[d]/C[d] plane (called when dragging a patch control point,
+// so a mixed entity+control-point selection moves together)
+void moveentgroup(int d, float dr, float dc)
+{
+    vector<extentity *> &ents = entities::getents();
+    loopv(entgroup) if(ents.inrange(entgroup[i])) { extentity &e = *ents[entgroup[i]]; e.o[R[d]] += dr; e.o[C[d]] += dc; }
+}
+
+void clearentgroup() { entgroup.shrink(0); }   // deselect entities (used when selecting only a control point)
 
 VAR(showentradius, 0, 1, 1);
 
@@ -825,7 +839,15 @@ ICOMMAND(entmovingsel, "b", (int *n),
         if(!*n || enthover < 0 || noentedit()) entmoving = 0;
         else if(!entmoving)
         {
-            if(entgroup.find(enthover) < 0) { entgroup.setsize(0); entadd(enthover); }
+            if(entgroup.find(enthover) < 0)
+            {
+                entgroup.setsize(0);
+#ifndef STANDALONE
+                extern void patchcancel();   // selecting only this entity clears any control-point selection too
+                patchcancel();
+#endif
+                entadd(enthover);
+            }
             entmoving = 1;
         }
     }

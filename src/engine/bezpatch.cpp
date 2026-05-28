@@ -178,6 +178,8 @@ extern selinfo sel;            // current edit selection (world.cpp); used to pl
 extern void createtexture(int tnum, int w, int h, void *pixels, int clamp, int filter, GLenum component, GLenum subtarget, int pw, int ph, int pitch, bool resize, GLenum format, bool swizzle);
 extern void calctexgen(VSlot &vslot, int dim, vec4 &sgen, vec4 &tgen);   // cube texture projection (octarender.cpp)
 extern const vec orientation_tangent[8][3];                              // per-orientation tangent the cube uses
+extern void moveentgroup(int d, float dr, float dc);                     // world.cpp: drag selected entities too
+extern void clearentgroup();                                             // world.cpp: deselect entities
 
 // dominant axis of a patch's average normal -- the "face" it projects onto, like a cube face's dimension
 static int patchdim(bezpatch *p)
@@ -523,6 +525,21 @@ float raypatchcp(const vec &o, const vec &ray)
 // until /calclight re-bakes). UV/texture changes keep the lightmap.
 static void invalidatepatch(bezpatch *p) { p->dirty = true; p->freelm(); }
 
+// move all selected control points by a delta in the R[d]/C[d] plane (called when dragging an entity too,
+// so a mixed entity+control-point selection moves together)
+void movepatchgroup(int d, float dr, float dc)
+{
+    loopv(patchgroup)
+    {
+        patchcpsel &s = patchgroup[i];
+        if(!patches.inrange(s.patch) || !patches[s.patch]->ctrl.inrange(s.cp)) continue;
+        vec &cc = patches[s.patch]->ctrl[s.cp];
+        cc[R[d]] += dr;
+        cc[C[d]] += dc;
+        invalidatepatch(patches[s.patch]);
+    }
+}
+
 // move the whole selected control-point group by the delta of the focus point (the just-clicked one),
 // within the plane of its grabbed box face -- the same scheme entdrag() uses for a group of entities.
 void patchdrag(const vec &ray)
@@ -545,15 +562,8 @@ void patchdrag(const vec &ray)
     float dcl = (entselsnap ? g[C[d]] : dest[C[d]]) - c[C[d]];
     patchmoving = 2;
     if(dr == 0 && dcl == 0) return;
-    loopv(patchgroup)   // apply the same delta to every selected control point
-    {
-        patchcpsel &s = patchgroup[i];
-        if(!patches.inrange(s.patch) || !patches[s.patch]->ctrl.inrange(s.cp)) continue;
-        vec &cc = patches[s.patch]->ctrl[s.cp];
-        cc[R[d]] += dr;
-        cc[C[d]] += dcl;
-        invalidatepatch(patches[s.patch]);
-    }
+    movepatchgroup(d, dr, dcl);   // move selected control points...
+    moveentgroup(d, dr, dcl);     // ...and any selected entities, together
 }
 
 // called from rendereditcursor while a drag is in progress
@@ -623,7 +633,7 @@ static void patchstartmove(bool add)
     if(idx >= 0) { patchcpsel s = patchgroup.remove(idx); patchgroup.add(s); }   // already selected -> focus it, keep group
     else
     {
-        if(!add) patchgroup.setsize(0);                                          // left click: select only this point
+        if(!add) { patchgroup.setsize(0); clearentgroup(); }                     // left click: select only this point
         patchcpsel &s = patchgroup.add();
         s.patch = patchhover; s.cp = patchhovercp;
     }
