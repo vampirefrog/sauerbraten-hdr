@@ -155,6 +155,10 @@ void cancelsel()
 {
     cubecancel();
     entcancel();
+#ifndef STANDALONE
+    extern void patchcancel();
+    patchcancel();
+#endif
 }
 
 void toggleedit(bool force)

@@ -317,10 +317,17 @@ float patchshadowdist(const vec &o, const vec &dir, float radius)
 }
 
 // edit state (defined up here so the creation commands can reference them)
-int patchhover = -1, patchhovercp = -1;   // patch + control-point index under the crosshair
-int patchsel = -1;                         // sticky "active" patch (last hovered); grid + commands target it
-int patchorient = 0;                       // box face under the crosshair (like entorient)
-int patchmoving = 0;                       // 0 idle, 1 first drag frame, 2 dragging
+int patchhover = -1, patchhovercp = -1;     // patch + control-point index under the crosshair (transient)
+int patchorient = 0;                         // box face under the crosshair (like entorient)
+int patchmoving = 0;                         // 0 idle, 1 first drag frame, 2 dragging
+
+// selected control points (a group, possibly spanning multiple patches), like the entity entgroup
+struct patchcpsel { int patch, cp; };
+vector<patchcpsel> patchgroup;
+static int patchgroupfind(int p, int c) { loopv(patchgroup) if(patchgroup[i].patch == p && patchgroup[i].cp == c) return i; return -1; }
+
+// deselect all control points (called from cancelsel() so SPACE clears patches with everything else)
+void patchcancel() { patchgroup.setsize(0); }
 
 // ---- creation -------------------------------------------------------------
 
@@ -486,6 +493,9 @@ static void cpbox(const vec &c, vec &eo, vec &es)
 // and returns the hit distance (1e16 if none) so the editor can compare it against world/entity hits.
 float raypatchcp(const vec &o, const vec &ray)
 {
+    for(int i = patchgroup.length(); --i >= 0; )   // drop stale selections (e.g. after a map load / delete)
+        if(!patches.inrange(patchgroup[i].patch) || !patches[patchgroup[i].patch]->ctrl.inrange(patchgroup[i].cp))
+            patchgroup.remove(i);
     patchhover = patchhovercp = -1;
     float best = 1e16f;
     loopv(patches)
@@ -506,18 +516,21 @@ float raypatchcp(const vec &o, const vec &ray)
             }
         }
     }
-    if(patchhover >= 0) patchsel = patchhover;   // remember the active patch (sticky)
     return best;
 }
 
-// move the hovered control point within the plane of the grabbed box face -- the exact mechanism
-// entdrag() uses (d = the face dimension, slide within R[d]/C[d]).
+// editing a patch's geometry invalidates its baked lightmap -> drop it (falls back to forward lighting
+// until /calclight re-bakes). UV/texture changes keep the lightmap.
+static void invalidatepatch(bezpatch *p) { p->dirty = true; p->freelm(); }
+
+// move the whole selected control-point group by the delta of the focus point (the just-clicked one),
+// within the plane of its grabbed box face -- the same scheme entdrag() uses for a group of entities.
 void patchdrag(const vec &ray)
 {
-    if(!patches.inrange(patchhover)) { patchmoving = 0; return; }
-    bezpatch *p = patches[patchhover];
-    if(!p->ctrl.inrange(patchhovercp)) { patchmoving = 0; return; }
-    vec &c = p->ctrl[patchhovercp];
+    if(patchgroup.empty()) { patchmoving = 0; return; }
+    patchcpsel f = patchgroup.last();   // focus = last-added (just-clicked) control point
+    if(!patches.inrange(f.patch) || !patches[f.patch]->ctrl.inrange(f.cp)) { patchmoving = 0; return; }
+    vec &c = patches[f.patch]->ctrl[f.cp];
     int d = dimension(patchorient), dc = dimcoord(patchorient);
     vec eo, es;
     cpbox(c, eo, es);
@@ -528,10 +541,19 @@ void patchdrag(const vec &ray)
     int z = g[d]&(~(sel.grid-1));
     g.add(sel.grid/2).mask(~(sel.grid-1));
     g[d] = z;
-    c[R[d]] = entselsnap ? g[R[d]] : dest[R[d]];
-    c[C[d]] = entselsnap ? g[C[d]] : dest[C[d]];
-    p->dirty = true;
+    float dr = (entselsnap ? g[R[d]] : dest[R[d]]) - c[R[d]];   // delta from the focus point
+    float dcl = (entselsnap ? g[C[d]] : dest[C[d]]) - c[C[d]];
     patchmoving = 2;
+    if(dr == 0 && dcl == 0) return;
+    loopv(patchgroup)   // apply the same delta to every selected control point
+    {
+        patchcpsel &s = patchgroup[i];
+        if(!patches.inrange(s.patch) || !patches[s.patch]->ctrl.inrange(s.cp)) continue;
+        vec &cc = patches[s.patch]->ctrl[s.cp];
+        cc[R[d]] += dr;
+        cc[C[d]] += dcl;
+        invalidatepatch(patches[s.patch]);
+    }
 }
 
 // called from rendereditcursor while a drag is in progress
@@ -540,26 +562,44 @@ void editpatches(const vec &ray)
     if(patchmoving) patchdrag(ray);
 }
 
+static void drawpatchnet(bezpatch *p)
+{
+    gle::begin(GL_LINES);
+    loop(y, p->rows) loop(x, p->cols)
+    {
+        if(x+1 < p->cols) { gle::attrib(p->cp(x, y)); gle::attrib(p->cp(x+1, y)); }
+        if(y+1 < p->rows) { gle::attrib(p->cp(x, y)); gle::attrib(p->cp(x, y+1)); }
+    }
+    xtraverts += gle::end();
+}
+
 void renderpatchhandles()
 {
-    // control net only on the active patch (keeps the view uncluttered; markers still show on all patches)
-    if(patches.inrange(patchsel))
+    gle::colorub(60, 120, 220);
+    gle::defvertex();
+    if(patchgroup.length())
     {
-        bezpatch *p = patches[patchsel];
-        gle::colorub(60, 120, 220);
-        gle::defvertex();
-        gle::begin(GL_LINES);
-        loop(y, p->rows) loop(x, p->cols)
+        // selection exists: draw the skeleton of every patch that has a selected control point
+        loopv(patches)
         {
-            if(x+1 < p->cols) { gle::attrib(p->cp(x, y)); gle::attrib(p->cp(x+1, y)); }
-            if(y+1 < p->rows) { gle::attrib(p->cp(x, y)); gle::attrib(p->cp(x, y+1)); }
+            bool sel = false;
+            loopvj(patchgroup) if(patchgroup[j].patch == i) { sel = true; break; }
+            if(sel) drawpatchnet(patches[i]);
         }
-        xtraverts += gle::end();
     }
+    else if(patches.inrange(patchhover)) drawpatchnet(patches[patchhover]);   // none selected: preview the hovered patch
 
-    // control-point markers themselves are the blue PART_EDIT sparkles emitted in renderparticles.cpp
-    // (same as entities). Only the hovered one gets the selection box + red grab-face, exactly like
-    // renderentselection() does for enthover.
+    // markers are the blue PART_EDIT sparkles (renderparticles.cpp). Selected control points get a green
+    // box; the hovered one gets the red grab-face -- same convention as entity selection.
+    gle::colorub(0, 180, 0);
+    loopv(patchgroup)
+    {
+        patchcpsel &s = patchgroup[i];
+        if(!patches.inrange(s.patch) || !patches[s.patch]->ctrl.inrange(s.cp)) continue;
+        vec eo, es;
+        cpbox(patches[s.patch]->ctrl[s.cp], eo, es);
+        boxs3D(eo, es, 1);
+    }
     if(patches.inrange(patchhover) && patches[patchhover]->ctrl.inrange(patchhovercp))
     {
         vec eo, es;
@@ -572,21 +612,28 @@ void renderpatchhandles()
     }
 }
 
-// hovering a control point starts/continues a drag (bind a key to this, like entmoving)
+// clicking a control point adds it to the selection group (if not already in it) and starts a drag of the
+// whole group -- mirroring entmoving/entadd. The just-clicked point becomes the focus (group.last()).
 ICOMMAND(patchmoving, "b", (int *n),
 {
     if(*n >= 0)
     {
         if(!*n || patchhover < 0 || noedit(true)) patchmoving = 0;
-        else if(!patchmoving) patchmoving = 1;
+        else if(!patchmoving)
+        {
+            int idx = patchgroupfind(patchhover, patchhovercp);
+            if(idx < 0) { patchcpsel &s = patchgroup.add(); s.patch = patchhover; s.cp = patchhovercp; }
+            else { patchcpsel s = patchgroup.remove(idx); patchgroup.add(s); }   // make it the focus
+            patchmoving = 1;
+        }
     }
     intret(patchmoving);
 });
 
-// active patch for grow/shrink/material ops: the hovered one, else the last created
+// active patch for ops/skeleton: the focus (last-selected) control point's patch, else the hovered, else last
 static bezpatch *activepatch()
 {
-    if(patches.inrange(patchsel)) return patches[patchsel];
+    if(patchgroup.length() && patches.inrange(patchgroup.last().patch)) return patches[patchgroup.last().patch];
     if(patches.inrange(patchhover)) return patches[patchhover];
     return patches.empty() ? NULL : patches.last();
 }
@@ -602,6 +649,7 @@ ICOMMAND(patchgrow, "ii", (int *du, int *dv),
     if(!(nc&1)) nc--;
     if(!(nr&1)) nr--;
     p->setdims(nc, nr);
+    p->freelm();
     conoutf("patch grid %dx%d", p->cols, p->rows);
 });
 
@@ -612,6 +660,7 @@ ICOMMAND(patchcp, "iifff", (int *patch, int *cp, float *x, float *y, float *z),
     if(!patches.inrange(*patch) || !patches[*patch]->ctrl.inrange(*cp)) return;
     patches[*patch]->ctrl[*cp] = vec(*x, *y, *z);
     patches[*patch]->dirty = true;
+    patches[*patch]->freelm();
 });
 
 // set a patch's texture/material vslot directly (scripting/testing)
@@ -620,7 +669,7 @@ ICOMMAND(patchsetvslot, "ii", (int *patch, int *vslot),
     if(noedit(true)) return;
     if(!patches.inrange(*patch)) return;
     patches[*patch]->vslot = *vslot;
-    patches[*patch]->dirty = true;
+    patches[*patch]->dirty = true;   // texture change keeps the lightmap (lighting is independent of diffuse)
 });
 
 // move a control point by a delta (scripting/testing)
@@ -630,6 +679,7 @@ ICOMMAND(patchnudge, "iifff", (int *patch, int *cp, float *dx, float *dy, float 
     if(!patches.inrange(*patch) || !patches[*patch]->ctrl.inrange(*cp)) return;
     patches[*patch]->ctrl[*cp].add(vec(*dx, *dy, *dz));
     patches[*patch]->dirty = true;
+    patches[*patch]->freelm();
 });
 
 // ---- texture alignment: recompute the stored control-point UVs (GtkRadiant-style) ----------------
@@ -689,7 +739,7 @@ ICOMMAND(patchinvert, "", (),
         swap(p->cp(x, y), p->cp(p->cols-1-x, y));
         swap(p->uv(x, y), p->uv(p->cols-1-x, y));
     }
-    p->dirty = true;
+    invalidatepatch(p);
 });
 
 // even out control-point spacing: each sub-patch midpoint moves to the average of its endpoints
@@ -702,7 +752,7 @@ ICOMMAND(patchredisperse, "", (),
         p->cp(x, y) = vec(p->cp(x-1, y)).add(p->cp(x+1, y)).mul(0.5f);
     for(int y = 1; y < p->rows; y += 2) loop(x, p->cols)
         p->cp(x, y) = vec(p->cp(x, y-1)).add(p->cp(x, y+1)).mul(0.5f);
-    p->dirty = true;
+    invalidatepatch(p);
 });
 
 // ---- delete / copy / paste ----------------------------------------------------------------------
@@ -711,12 +761,15 @@ ICOMMAND(patchredisperse, "", (),
 // DEL binding can fall through to cube/entity deletion otherwise). Bound via editdel in stdedit.cfg.
 ICOMMAND(delpatch, "", (),
 {
-    if(noedit(true) || !patches.inrange(patchhover)) { intret(0); return; }
-    int idx = patchhover;
-    patches[idx]->freelm();
-    delete patches.remove(idx);
+    if(noedit(true)) { intret(0); return; }
+    // distinct patches that have a selected control point; else the hovered patch
+    vector<bezpatch *> del;
+    loopv(patchgroup) if(patches.inrange(patchgroup[i].patch) && del.find(patches[patchgroup[i].patch]) < 0) del.add(patches[patchgroup[i].patch]);
+    if(del.empty() && patches.inrange(patchhover)) del.add(patches[patchhover]);
+    if(del.empty()) { intret(0); return; }
+    loopv(del) { int idx = patches.find(del[i]); if(idx >= 0) { del[i]->freelm(); delete patches.remove(idx); } }
+    patchgroup.setsize(0);
     patchhover = patchhovercp = -1;
-    patchsel = -1;
     patchmoving = 0;
     intret(1);
 });
@@ -748,13 +801,21 @@ ICOMMAND(patchpaste, "", (),
     p->setdims(patchclipboard.cols, patchclipboard.rows);
     p->vslot = patchclipboard.vslot;
     p->tess = patchclipboard.tess;
-    int g = sel.grid > 0 ? sel.grid : 16;
-    loopv(p->ctrl) p->ctrl[i] = vec(patchclipboard.ctrl[i]).add(vec(g, g, 0));   // offset so it doesn't overlap
+    loopv(p->ctrl) p->ctrl[i] = patchclipboard.ctrl[i];
     loopv(p->cpuv) p->cpuv[i] = patchclipboard.cpuv[i];
+    // translate so the patch's centre lands at the edit cursor (selected location)
+    vec centroid(0, 0, 0);
+    loopv(p->ctrl) centroid.add(p->ctrl[i]);
+    centroid.div(p->ctrl.length());
+    vec off = vec(sel.o).add(vec(sel.grid*0.5f, sel.grid*0.5f, sel.grid*0.5f)).sub(centroid);
+    loopv(p->ctrl) p->ctrl[i].add(off);
     p->dirty = true;
+    int idx = patches.length();
     patches.add(p);
-    patchsel = patches.length()-1;
-    conoutf("pasted patch %d", patchsel);
+    // select the whole pasted patch so it's active and can be dragged into place
+    patchgroup.setsize(0);
+    loopv(p->ctrl) { patchcpsel &s = patchgroup.add(); s.patch = idx; s.cp = i; }
+    conoutf("pasted patch %d", idx);
 });
 
 #endif // !STANDALONE
