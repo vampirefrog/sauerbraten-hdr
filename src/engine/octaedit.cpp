@@ -373,7 +373,7 @@ extern void entdrag(const vec &ray);
 extern void editpatches(const vec &ray);   // bezpatch.cpp (declared locally, like entdrag)
 extern float raypatchcp(const vec &o, const vec &ray);
 extern void renderpatchhandles();
-extern int patchmoving, patchhover, patchhovercp;
+extern int patchmoving, patchhover, patchhovercp, patchhoversurf;
 extern bool hoveringonent(int ent, int orient);
 extern void renderentselection(const vec &o, const vec &ray, bool entmoving);
 extern float rayent(const vec &o, const vec &ray, float radius, int mode, int size, int &orient, int &ent);
@@ -443,14 +443,14 @@ void rendereditcursor()
                 }
             }
 
-        // bezier control points pick like entity markers: nearest box hit under the crosshair wins
+        // bezier control points (and patch bodies) pick like entity markers: nearest hit under the crosshair wins
         float pdist = hidecursor ? 1e16f : raypatchcp(player->o, camdir);
-        bool cphover = patchhover >= 0 && pdist <= wdist;
-        if(!cphover) patchhover = patchhovercp = -1;
+        bool cphover = (patchhover >= 0 || patchhoversurf >= 0) && pdist <= wdist;
+        if(!cphover) patchhover = patchhovercp = patchhoversurf = -1;
 
         if(cphover)
         {
-            hoveringonent(-1, entorient);   // a control point is under the crosshair: no cube/ent select
+            hoveringonent(-1, entorient);   // a control point / patch body is under the crosshair: no cube/ent select
             hovering = true;
         }
         else if((hovering = hoveringonent(hidecursor ? -1 : ent, entorient)))

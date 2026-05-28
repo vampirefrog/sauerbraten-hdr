@@ -320,6 +320,8 @@ float patchshadowdist(const vec &o, const vec &dir, float radius)
 
 // edit state (defined up here so the creation commands can reference them)
 int patchhover = -1, patchhovercp = -1;     // patch + control-point index under the crosshair (transient)
+int patchhoversurf = -1;                     // patch whose SURFACE (body) is under the crosshair (no CP hit)
+vec patchsurfnormal(0, 0, 1);                // surface normal at that hit (for the drag plane)
 int patchorient = 0;                         // box face under the crosshair (like entorient)
 int patchmoving = 0;                         // 0 idle, 1 first drag frame, 2 dragging
 
@@ -498,7 +500,7 @@ float raypatchcp(const vec &o, const vec &ray)
     for(int i = patchgroup.length(); --i >= 0; )   // drop stale selections (e.g. after a map load / delete)
         if(!patches.inrange(patchgroup[i].patch) || !patches[patchgroup[i].patch]->ctrl.inrange(patchgroup[i].cp))
             patchgroup.remove(i);
-    patchhover = patchhovercp = -1;
+    patchhover = patchhovercp = patchhoversurf = -1;
     float best = 1e16f;
     loopv(patches)
     {
@@ -515,6 +517,30 @@ float raypatchcp(const vec &o, const vec &ray)
                 patchhover = i;
                 patchhovercp = j;
                 patchorient = orient;
+            }
+        }
+    }
+    if(patchhover >= 0) return best;   // a control-point handle takes priority over the body
+
+    // otherwise, which patch's surface (body) is under the crosshair -> used to select the whole patch
+    loopv(patches)
+    {
+        bezpatch *p = patches[i];
+        if(p->dirty) p->tessellate();
+        if(p->tris.empty()) continue;
+        vec bc; float br;
+        p->boundsphere(bc, br);
+        vec oc = vec(bc).sub(o);
+        float proj = clamp(oc.dot(ray), 0.0f, best);
+        if(vec(ray).mul(proj).add(o).squaredist(bc) > br*br) continue;
+        for(int j = 0; j+2 < p->tris.length(); j += 3)
+        {
+            float t;
+            if(raytri(o, ray, p->verts[p->tris[j]], p->verts[p->tris[j+1]], p->verts[p->tris[j+2]], t) && t < best)
+            {
+                best = t;
+                patchhoversurf = i;
+                patchsurfnormal = p->norms[p->tris[j]];
             }
         }
     }
@@ -597,7 +623,8 @@ void renderpatchhandles()
             if(sel) drawpatchnet(patches[i]);
         }
     }
-    else if(patches.inrange(patchhover)) drawpatchnet(patches[patchhover]);   // none selected: preview the hovered patch
+    else if(patches.inrange(patchhover)) drawpatchnet(patches[patchhover]);            // none selected: preview the hovered CP's patch
+    else if(patches.inrange(patchhoversurf)) drawpatchnet(patches[patchhoversurf]);    // ...or the patch body under the crosshair
 
     // markers are the blue PART_EDIT sparkles (renderparticles.cpp). Selected control points get a green
     // box; the hovered one gets the red grab-face -- same colours as entity selection.
@@ -627,21 +654,33 @@ void renderpatchhandles()
 // adds it to the selection. Then starts a drag. Mirrors how we want entities to behave too.
 static void patchstartmove(bool add)
 {
-    if(patchhover < 0 || noedit(true)) { patchmoving = 0; return; }
-    if(patchmoving) return;
-    if(!add)   // left click: this control point becomes the ONLY selection
+    if(noedit(true) || patchmoving) { if(patchmoving) return; patchmoving = 0; return; }
+    if(patchhover >= 0)   // a control-point handle
     {
-        patchgroup.setsize(0);
-        clearentgroup();
-        patchcpsel &s = patchgroup.add();
-        s.patch = patchhover; s.cp = patchhovercp;
+        if(!add)   // left click: this control point becomes the ONLY selection
+        {
+            patchgroup.setsize(0);
+            clearentgroup();
+            patchcpsel &s = patchgroup.add();
+            s.patch = patchhover; s.cp = patchhovercp;
+        }
+        else       // right click: add to the selection (or just re-focus it if already selected)
+        {
+            int idx = patchgroupfind(patchhover, patchhovercp);
+            if(idx >= 0) { patchcpsel s = patchgroup.remove(idx); patchgroup.add(s); }
+            else { patchcpsel &s = patchgroup.add(); s.patch = patchhover; s.cp = patchhovercp; }
+        }
     }
-    else       // right click: add to the selection (or just re-focus it if already selected)
+    else if(patches.inrange(patchhoversurf))   // the patch body: (left) select / (right) add ALL its control points
     {
-        int idx = patchgroupfind(patchhover, patchhovercp);
-        if(idx >= 0) { patchcpsel s = patchgroup.remove(idx); patchgroup.add(s); }
-        else { patchcpsel &s = patchgroup.add(); s.patch = patchhover; s.cp = patchhovercp; }
+        bezpatch *p = patches[patchhoversurf];
+        if(!add) { patchgroup.setsize(0); clearentgroup(); }
+        loopv(p->ctrl) if(patchgroupfind(patchhoversurf, i) < 0) { patchcpsel &s = patchgroup.add(); s.patch = patchhoversurf; s.cp = i; }
+        // drag plane perpendicular to the surface normal at the hit (so the whole patch slides naturally)
+        vec a(fabs(patchsurfnormal.x), fabs(patchsurfnormal.y), fabs(patchsurfnormal.z));
+        patchorient = 2 * (a.x >= a.y && a.x >= a.z ? 0 : (a.y >= a.z ? 1 : 2));
     }
+    else { patchmoving = 0; return; }
     patchmoving = 1;
 }
 
