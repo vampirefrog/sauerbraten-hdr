@@ -785,17 +785,33 @@ ICOMMAND(patchfit, "ff", (float *tu, float *tv),
 
 // ---- geometry fix commands ----------------------------------------------------------------------
 
-// rotate the hovered patch 90 degrees about the axis of the control-point box face under the crosshair
-// (R + mouse wheel). The rotation happens in the plane perpendicular to that face normal. Returns 1 if it
-// rotated a patch so the edit binding can fall through to cube/entity rotation otherwise.
+// rotate the hovered patch 90 degrees (R + mouse wheel), in the plane perpendicular to the face normal.
+// Pointing at a control-point box face -> pivot about that control point, axis = its box face. Pointing at
+// the patch body -> pivot about the patch centre, axis = the surface normal. Returns 1 if it rotated a patch
+// so the edit binding can fall through to cube/entity rotation otherwise.
 ICOMMAND(patchrotate, "i", (int *dir),
 {
-    if(noedit(true) || !patches.inrange(patchhover) || !patches[patchhover]->ctrl.inrange(patchhovercp)) { intret(0); return; }
-    bezpatch *p = patches[patchhover];
-    int d = dimension(patchorient);
+    if(noedit(true)) { intret(0); return; }
+    bezpatch *p = NULL;
+    int d = 2;
+    vec c(0, 0, 0);
+    if(patches.inrange(patchhover) && patches[patchhover]->ctrl.inrange(patchhovercp))
+    {
+        p = patches[patchhover];
+        d = dimension(patchorient);
+        c = p->ctrl[patchhovercp];                 // pivot about the control point under the crosshair
+    }
+    else if(patches.inrange(patchhoversurf))
+    {
+        p = patches[patchhoversurf];
+        vec a(fabs(patchsurfnormal.x), fabs(patchsurfnormal.y), fabs(patchsurfnormal.z));
+        d = a.x >= a.y && a.x >= a.z ? 0 : (a.y >= a.z ? 1 : 2);   // axis = surface normal's dominant axis
+        loopv(p->ctrl) c.add(p->ctrl[i]);
+        c.div(p->ctrl.length());                   // pivot about the patch centre
+    }
+    else { intret(0); return; }
     int a0 = (d+1)%3;
     int a1 = (d+2)%3;
-    vec c = p->ctrl[patchhovercp];   // pivot about the control point under the crosshair
     loopv(p->ctrl)
     {
         vec r = vec(p->ctrl[i]).sub(c);
