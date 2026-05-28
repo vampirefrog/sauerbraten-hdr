@@ -790,14 +790,12 @@ ICOMMAND(patchfit, "ff", (float *tu, float *tv),
 // rotated a patch so the edit binding can fall through to cube/entity rotation otherwise.
 ICOMMAND(patchrotate, "i", (int *dir),
 {
-    if(noedit(true) || !patches.inrange(patchhover)) { intret(0); return; }
+    if(noedit(true) || !patches.inrange(patchhover) || !patches[patchhover]->ctrl.inrange(patchhovercp)) { intret(0); return; }
     bezpatch *p = patches[patchhover];
     int d = dimension(patchorient);
     int a0 = (d+1)%3;
     int a1 = (d+2)%3;
-    vec c(0, 0, 0);
-    loopv(p->ctrl) c.add(p->ctrl[i]);
-    c.div(p->ctrl.length());
+    vec c = p->ctrl[patchhovercp];   // pivot about the control point under the crosshair
     loopv(p->ctrl)
     {
         vec r = vec(p->ctrl[i]).sub(c);
