@@ -419,6 +419,8 @@ void renderpatches()
     gle::deftexcoord0();
     gle::deftexcoord1();
 
+    GLOBALPARAM(camera, camera1->o);   // for tangent-space view dir (parallax/spec)
+
     loopv(patches)
     {
         bezpatch *p = patches[i];
@@ -426,13 +428,20 @@ void renderpatches()
         VSlot &vs = lookupvslot(p->vslot, true);
         Slot &s = *vs.slot;
         Texture *diffuse = s.sts.inrange(0) ? s.sts[0].t : notexture;
-        Texture *norm = slottex(s, TEX_NORMAL), *glow = slottex(s, TEX_GLOW);
+        Texture *norm = slottex(s, TEX_NORMAL), *glow = slottex(s, TEX_GLOW), *spec = slottex(s, TEX_SPEC);
         bool baked = p->lmtex[0] != 0;
         if(baked) SETSHADER(bezpatchlm); else SETSHADER(bezpatch);
         glActiveTexture_(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, diffuse->id);
         glActiveTexture_(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, (norm ? norm : notexture)->id);
         glActiveTexture_(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, (glow ? glow : notexture)->id);
-        if(baked) loopk(3) { glActiveTexture_(GL_TEXTURE3+k); glBindTexture(GL_TEXTURE_2D, p->lmtex[k]); }
+        if(baked)
+        {
+            loopk(3) { glActiveTexture_(GL_TEXTURE3+k); glBindTexture(GL_TEXTURE_2D, p->lmtex[k]); }
+            glActiveTexture_(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, (spec ? spec : notexture)->id);
+            GLOBALPARAMF(pspec, spec ? 1.0f : 0.0f);
+            bool height = (s.texmask & (1<<TEX_DEPTH)) != 0;
+            GLOBALPARAMF(pparallax, height ? 0.06f : 0.0f, height ? -0.03f : 0.0f);
+        }
         glActiveTexture_(GL_TEXTURE0);
         GLOBALPARAMF(pcolor, 2*vs.colorscale.x, 2*vs.colorscale.y, 2*vs.colorscale.z, 1.0f);   // 2x overbright, like world surfaces
         GLOBALPARAMF(pbump, norm ? 1.0f : 0.0f);
