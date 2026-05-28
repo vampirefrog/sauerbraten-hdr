@@ -240,6 +240,7 @@ for sky/sun brightness (the sun disk is unclamped under `hdr`, so push these hig
 | `patchprojaxis` / `patchnaturalize` / `patchfit u v` | recompute the active patch's per-CP UVs (axis-aligned planar projection / arc-length natural / fit to (u,v) tiles) |
 | `patchcount` | print/return the number of patches in the map |
 | `clearpatches` | delete every patch (undoable) |
+| `writegltf <name>` | export the current map as `<name>.gltf` + `<name>.bin`, with each HDR lightmap atlas page emitted as a tonemapped `<name>_lm<N>.png` AND a linear-light Radiance `<name>_lm<N>.hdr`. Materials wire the lightmap into `emissiveTexture` on `TEXCOORD_1`, with the page's peak luminance carried as `KHR_materials_emissive_strength` so HDR-aware viewers (three.js, glTF Sample Viewer) reproduce real brightness. LDR viewers see the tonemapped PNG. Sun + point-light entities are exported as `KHR_lights_punctual`. `extensionsRequired` is `KHR_mesh_quantization`. |
 
 ## Building
 
