@@ -252,12 +252,32 @@ static float shadowent(octaentities *oc, const vec &o, const vec &ray, float rad
             diff >>= 1; \
         } while(diff);
 
+// nearest hit along (o,ray) against any bezier patch triangle (defined in bezpatch.cpp). Shared
+// with shadowray for the lightmap bake; here it's always live so bullets stop on patches.
+extern float patchshadowdist(const vec &o, const vec &dir, float radius);
+
 float raycube(const vec &o, const vec &ray, float radius, int mode, int size, extentity *t)
 {
     if(ray.iszero()) return 0;
 
     INITRAYCUBE;
     CHECKINSIDEWORLD;
+
+    // bezier patches: clamp the ray's effective radius to the nearest patch-triangle hit so the octree
+    // walk returns the patch hit when nothing solid intercepts sooner. This makes bullets/hitscans
+    // stop on patches the same way they stop on cubes; RAY_PASS (geometry-pass mode) is exempted.
+    if(!(mode&RAY_PASS))
+    {
+        float pr = radius > 0 ? radius : 1e16f;
+        float ph = patchshadowdist(o, ray, pr);
+        if(ph < pr)
+        {
+            radius = ph;
+            // record the surface so callers reading hitsurface see a patch hit, not a stale octree axis.
+            // use zero (unknown); weapon code only needs the distance to position the impact.
+            hitsurface = vec(0, 0, 0);
+        }
+    }
 
     int closest = -1, x = int(v.x), y = int(v.y), z = int(v.z);
     for(;;)
@@ -309,9 +329,9 @@ static inline bool skyfaceexposed(const cube &c, int side, const ivec &lo, int s
 
 // bezier patches occlude light only during the lightmap bake (patchcastshadows is set just for calclight),
 // so runtime shadow rays pay nothing. Clamping the radius to the nearest patch hit makes the octree walk
-// report occlusion at that distance if nothing solid blocks sooner.
+// report occlusion at that distance if nothing solid blocks sooner. (patchshadowdist itself is declared
+// above next to raycube.)
 extern bool patchcastshadows;
-extern float patchshadowdist(const vec &o, const vec &dir, float radius);
 
 // optimized version for lightmap shadowing... every cycle here counts!!!
 float shadowray(const vec &o, const vec &ray, float radius, int mode, extentity *t)

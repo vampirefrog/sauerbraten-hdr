@@ -32,6 +32,9 @@ upstream Sauerbraten distribution and drop it next to the binary.
 - **Light-probe grid** — baked ambient cubes (irradiance volume) that light dynamic mapmodels, à la Source.
 - **HDR textures & skyboxes** — Radiance `.hdr` images load as fp16 (textures, glow maps, cube faces).
 - **HDR-aware Nishita sky** — the existing `atmo` sky outputs true HDR radiance and can drive the bake.
+- **Bezier patches** — Quake3/Radiant-style curved surfaces alongside the octree, with the same texturing,
+  parallax/spec normal-mapped rendering, baked 3-basis RNM lightmaps, hitscan collision, undo/redo and
+  edit binds as cube faces. See [the section below](#bezier-patches).
 
 Everything defaults **off** (or is selected by file format), so a stock map renders byte-for-byte as before.
 
@@ -130,6 +133,53 @@ first-person weapon. All default to 1/0 (no change, physically correct); raise t
 - `giskybox 1` instead samples a loaded skybox image (LDR or `.hdr`) as the GI light, and drives the direct
   sun from its brightest texel. `atmo` takes precedence when both are on (it overrides the visible sky).
 
+### Bezier patches
+Curved surfaces alongside the octree — biquadratic Bezier patches in the GtkRadiant/Quake3 style
+(clean-room implementation; no GPL code). A patch is an odd-by-odd grid of control points (3×3 minimum,
+up to 99×99) tessellated into a smooth mesh. Each `(2,2)` chunk is one sub-patch sharing its edge CPs with
+its neighbours — like Radiant, a 5×5 grid is four stitched sub-patches.
+
+Patches share the cube's render path: same diffuse/normal/glow/spec slot textures, parallax depth, 2×
+overbright `colorscale`, and a baked 3-basis RNM lightmap synthesised from the same `gatherdirect` light
+gather as the world LMs (so sun, entity lights, GI, and the HDR pipeline all apply). When unbaked (just
+created or just edited) they fall back to a forward shader sampling the local ambient cube so they aren't
+black before `/calclight`.
+
+**Spawn** — in edit mode, point at a cube face and `/newpatch` (or bind a key to it). The patch lands on
+the selected face with the same offset entities use, inherits the underlying face's texture (or the
+default checkerboard if the selection has mixed textures), and the patch's nine starting CPs occupy the
+selection's footprint.
+
+**Edit** —
+- **left-click a CP**: select only that CP. **left-drag**: move it (and any other selected CPs).
+- **right-click a CP**: add it to the selection. **right-drag**: add and start dragging.
+- **left-click the patch body**: select all of its CPs (so a body-drag moves the whole patch).
+- **right-click the patch body**: add all the CPs to the existing selection (lets you grab multiple patches as a group).
+- Selection is shared with entities; dragging an entity also drags any selected CPs.
+- `R` + mouse wheel rotates the patch 90°. Pointing at a CP face → pivot about that CP, axis perpendicular
+  to the face. Pointing at the patch body → pivot about the patch centre, axis = the surface normal.
+- `Y` + mouse wheel cycles textures on selected patches (no need to keep the cursor on a CP). The F2
+  texture browser also retextures selected patches.
+- `C` copies all selected patches (relative positions preserved); `V` pastes them at the selected face
+  with the same outward offset as `/newpatch`.
+- `DEL` deletes patches that have any selected CP, falling through to cube/entity delete if no patches
+  are selected.
+- `U` / `I` undo / redo patch edits (create, delete, move, retexture, paste, grow, rotate). Patch and cube
+  undo stacks interleave by timestamp, so U always reverts the genuinely most-recent action.
+
+**Bake** — `/calclight` bakes patch lightmaps alongside the world's, producing a per-patch 3-basis RGBE
+atlas at the tessellation resolution (raise `patchtess` for finer LMs). The bake reads patch geometry as
+shadow casters too, so patches occlude sun and entity-light rays.
+
+**Save / load** — patches and their baked lightmaps are written into the `.ogz` at `MAPVERSION ≥ 37`. A
+v36 or older map loads with patches unbaked (run `/calclight`); v34/35 maps load with no patches at all.
+
+**Collision** — patches block player movement (ellipsoid vs triangle, via MPR) and hitscan bullets
+(`raycube` clamps its radius by the nearest patch-triangle hit). `RAY_PASS` is exempt so visibility
+queries and pass-through traces aren't blocked.
+
+`patchclip 0` to disable patch collision globally if you need to walk through them.
+
 ## Variable reference
 
 All new vars default to off/stock. "per-map" vars are bake-time and saved in the map; re-run `calclight`.
@@ -163,6 +213,8 @@ All new vars default to off/stock. "per-map" vars are bake-time and saved in the
 | `lightprobes` / `lightprobegrid` | 0 / 128 | bake + use the ambient-cube model-lighting grid / its spacing |
 | `modelbright` / `modelminbright` | 1 / 0 | multiply / floor the lighting of **all** dynamic models (1/0 = physically correct) |
 | `hudgunbright` / `hudgunminbright` | 1 / 0 | same, applied on top for the **first-person weapon** only (so a dark viewmodel reads in bright scenes) |
+| `patchtess` | 4 | bezier patch tessellation level (sub-patches × this = mesh density and LM resolution); raise for smoother curves / finer baked lighting |
+| `patchclip` | 1 | patches block player collision; 0 to walk through them |
 
 The HDR-aware `atmo` sky reuses the stock atmo vars; `atmobright` and `atmosundiskbright` are the main knobs
 for sky/sun brightness (the sun disk is unclamped under `hdr`, so push these higher than in LDR).
@@ -181,6 +233,13 @@ for sky/sun brightness (the sun disk is unclamped under `hdr`, so push these hig
 | `lightprobeinfo` | report the baked light-probe grid + the probe sampled at the camera (debug) |
 | `showlightprobes 0/1` | draw a heatmap cross at each (non-buried) light probe — blue = dim, red = bright — to see probe placement and brightness (debug) |
 | `debuglm` | fill lightmaps with solid debug colours and re-upload (debug) |
+| `newpatch [size]` | spawn a flat 3×3 patch on the selected face (size = control-grid extent in world units; default = `4 * gridpower`) |
+| `patchgrow du dv` | add/remove a whole bi-quadratic ring per axis (±2 control points; matches Radiant's grow/shrink) |
+| `patchrotate dir` | rotate the hovered patch 90° (also bound to `R` + mouse wheel; falls through to cube/ent rotation if no patch is hit) |
+| `patchinvert` | flip the surface normals of the active patch (reverse `u`) |
+| `patchprojaxis` / `patchnaturalize` / `patchfit u v` | recompute the active patch's per-CP UVs (axis-aligned planar projection / arc-length natural / fit to (u,v) tiles) |
+| `patchcount` | print/return the number of patches in the map |
+| `clearpatches` | delete every patch (undoable) |
 
 ## Building
 
@@ -199,8 +258,11 @@ folder for maps.
 
 - Every new feature is opt-in via a var (or selected by file format); with them off the engine renders
   existing maps identically to stock Sauerbraten.
-- Map version was bumped (34); the new engine loads older maps unchanged, and HDR/RNM data rides new
-  lightmap type bits plus an optional light-probe section that old maps simply don't have.
+- Map version is now 37 — bumped from 33 in steps as features landed (34: HDR/RNM lightmaps + light
+  probes; 35: bezier patches; 36: patch UVs; 37: per-patch baked RNM lightmap bytes). The new engine
+  loads any older `.ogz` unchanged: HDR/RNM data rides new lightmap type bits, the light-probe and
+  patch sections are optional (older maps simply don't have them), and a v36 patch reloads unbaked
+  (run `/calclight`).
 - See `HDR_TESTING.md` for a hands-on testing guide with example recipes for each feature.
 
 ## References

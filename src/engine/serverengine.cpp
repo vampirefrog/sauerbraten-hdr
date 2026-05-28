@@ -179,6 +179,9 @@ namespace game
     void edittoggled(bool) {}
     void forceedit(const char *) {}
     void edittrigger(const selinfo &, int, int, int, int, const VSlot *) {}
+    void patchedittrigger_upsert(int) {}
+    void patchedittrigger_delete(int) {}
+    void patchedittrigger_clear() {}
     const char *getclientmap() { return ""; }
     void resetgamestate() {}
     float ratespawn(dynent *, const extentity &) { return 1.0f; }

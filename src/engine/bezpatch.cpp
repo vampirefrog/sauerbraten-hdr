@@ -74,8 +74,15 @@ void bezpatch::tessellate()
         tris.add(c); tris.add(b); tris.add(d);
     }
 
-    // per-vertex tangent from the position/UV gradient (Lengyel), so the normal map lines up with whatever
-    // UV mapping is stored. Accumulate per triangle, then orthonormalize against the normal.
+    // per-vertex tangent from the position/UV gradient (Lengyel), so the normal map lines up with
+    // whatever UV mapping is stored. We accumulate BOTH T and B (UV-gradient bitangent) per triangle,
+    // then orthonormalize T against N and flip T if cross(N, T) ends up opposite the gradient-derived
+    // B -- without this handedness check the patch's effective bitangent mirrors the cube's for
+    // odd UV windings, putting normal-map bumps and the specular peak on the wrong side. Matches
+    // the cube's vtangent.w convention (orientation_bitangent.scalartriple(n, t) sign in
+    // octarender.cpp:852) but folded into the stored tangent so the shader's `cross(N,T)` is canonical.
+    vector<vec> bitangents;
+    loopv(tangents) bitangents.add(vec(0, 0, 0));
     for(int t = 0; t+2 < tris.length(); t += 3)
     {
         int i0 = tris[t], i1 = tris[t+1], i2 = tris[t+2];
@@ -83,14 +90,24 @@ void bezpatch::tessellate()
         vec2 d1 = vec2(tcs[i1]).sub(tcs[i0]), d2 = vec2(tcs[i2]).sub(tcs[i0]);
         float denom = d1.x*d2.y - d2.x*d1.y;
         if(denom > -1e-9f && denom < 1e-9f) continue;
-        vec tan = vec(e1).mul(d2.y).sub(vec(e2).mul(d1.y)).mul(1.0f/denom);
-        tangents[i0].add(tan); tangents[i1].add(tan); tangents[i2].add(tan);
+        float inv = 1.0f/denom;
+        vec tan = vec(e1).mul(d2.y).sub(vec(e2).mul(d1.y)).mul(inv);
+        vec bit = vec(e2).mul(d1.x).sub(vec(e1).mul(d2.x)).mul(inv);
+        tangents[i0].add(tan);   tangents[i1].add(tan);   tangents[i2].add(tan);
+        bitangents[i0].add(bit); bitangents[i1].add(bit); bitangents[i2].add(bit);
     }
     loopv(tangents)
     {
         vec t = tangents[i];
         t.sub(vec(norms[i]).mul(norms[i].dot(t)));
-        tangents[i] = t.iszero() ? vec(1, 0, 0) : t.normalize();
+        if(t.iszero()) { tangents[i] = vec(1, 0, 0); continue; }
+        t.normalize();
+        // cross(N, T) is what the shader uses as the bitangent. If that points opposite the
+        // gradient-derived bitangent for this triangle's UV winding, flip T so cross(N, T) lands
+        // canonical -- otherwise normal-map green is mirrored and the spec peak shifts.
+        vec cnt; cnt.cross(norms[i], t);
+        if(cnt.dot(bitangents[i]) < 0) t.neg();
+        tangents[i] = t;
     }
 }
 
@@ -140,6 +157,12 @@ void saveworldpatches(stream *f)
             f->putlil<float>(p->ctrl[j].z);
         }
         loopvj(p->cpuv) { f->putlil<float>(p->cpuv[j].x); f->putlil<float>(p->cpuv[j].y); }   // v36+
+        // v37+: baked RNM lightmap bytes (RGBE per basis). lmw=0 marks "not baked" -- writer must
+        // also gate on lmrgbe[0] being non-null since freelm() clears the bytes on geometry edit.
+        bool baked = p->lmw > 0 && p->lmh > 0 && p->lmrgbe[0] && p->lmrgbe[1] && p->lmrgbe[2];
+        f->putlil<ushort>(baked ? p->lmw : 0);
+        f->putlil<ushort>(baked ? p->lmh : 0);
+        if(baked) loopk(3) f->write(p->lmrgbe[k], p->lmw*p->lmh*4);
     }
 }
 
@@ -167,6 +190,26 @@ void loadworldpatches(stream *f, int mapversion)
         if(mapversion >= 36) loopvj(p->cpuv) { p->cpuv[j].x = f->getlil<float>(); p->cpuv[j].y = f->getlil<float>(); }
         else defaultpatchuv(p);   // pre-UV patches: synthesize a planar mapping
         p->dirty = true;
+        if(mapversion >= 37)
+        {
+            int lmw = f->getlil<ushort>(), lmh = f->getlil<ushort>();
+            if(lmw > 0 && lmh > 0 && lmw <= 256 && lmh <= 256)   // sanity bound (tess*usub+1 with tess<=16, dims<=99 -> well under 256)
+            {
+                int bytes = lmw*lmh*4;
+                uchar *rgbe[3] = { new uchar[bytes], new uchar[bytes], new uchar[bytes] };
+                loopk(3) f->read(rgbe[k], bytes);
+#ifndef STANDALONE
+                // tessellate so the patch has the lightmap UVs ready before uploading textures
+                p->tessellate();
+                p->uploadlm(rgbe[0], rgbe[1], rgbe[2], lmw, lmh);
+#else
+                // server build: just keep the bytes in memory so a /savemap on the server preserves them
+                loopk(3) { p->lmrgbe[k] = rgbe[k]; rgbe[k] = NULL; }
+                p->lmw = lmw; p->lmh = lmh;
+#endif
+                loopk(3) if(rgbe[k]) delete[] rgbe[k];
+            }
+        }
         patches.add(p);
     }
 }
@@ -194,24 +237,135 @@ static int patchdim(bezpatch *p)
 void bezpatch::freelm()
 {
     loopk(3) if(lmtex[k]) { glDeleteTextures(1, (GLuint *)&lmtex[k]); lmtex[k] = 0; }
+    // also drop the RGBE source bytes -- the bake is no longer valid, so saving stale bytes
+    // would re-load a lightmap that doesn't match the (now-edited) geometry.
+    loopk(3) if(lmrgbe[k]) { delete[] lmrgbe[k]; lmrgbe[k] = NULL; }
+    lmw = lmh = 0;
 }
 
-// decode the 3 baked RGBE basis buffers to linear fp16 and upload as 3 lightmap textures (RNM)
+// decode the 3 baked RGBE basis buffers to linear fp16 and upload as 3 lightmap textures (RNM).
+// We also keep a private copy of the source RGBE bytes so the bake survives /savemap, /reload, and
+// future coop-edit sync (no need to /calclight again after loading a previously-baked map).
 void bezpatch::uploadlm(uchar *rgbe0, uchar *rgbe1, uchar *rgbe2, int gw, int gh)
 {
     uchar *srcs[3] = { rgbe0, rgbe1, rgbe2 };
+    int bytes = gw*gh*4;
+    // shrink/grow the kept buffers to the new size; the bake's resolution can change if patchtess does.
+    loopk(3) if(lmrgbe[k]) { delete[] lmrgbe[k]; lmrgbe[k] = NULL; }
+    lmw = gw; lmh = gh;
     float *fdata = new float[gw*gh*3];
     loopk(3)
     {
         if(!lmtex[k]) { GLuint id = 0; glGenTextures(1, &id); lmtex[k] = id; }
         loopi(gw*gh) { vec c = decodergbe(&srcs[k][i*4]); fdata[i*3] = c.x; fdata[i*3+1] = c.y; fdata[i*3+2] = c.z; }
         createtexture(lmtex[k], gw, gh, fdata, 1, 1, GL_RGB16F, GL_TEXTURE_2D, gw, gh, 0, false, GL_RGB, false);
+        lmrgbe[k] = new uchar[bytes];
+        memcpy(lmrgbe[k], srcs[k], bytes);
     }
     delete[] fdata;
 }
 
 // --- bake interface: raw-pointer accessors so the (fast-math) lightmap.cpp bake never touches the struct ---
 int numpatches() { return patches.length(); }
+
+#endif // !STANDALONE -- close the block above, exposing the coop-edit mp* helpers below to BOTH the
+       // client and the standalone server build (the server maintains a mirror of the patches list).
+
+// --- coop-edit sync hooks: serialize one patch's editable state into ints (matching the wire format
+//     in client.cpp's patchedittrigger_upsert) so the game module can broadcast it; apply received
+//     UPSERT/DELETE/CLEAR messages onto the local patches list without re-broadcasting.
+//
+//     Wire format: ctrl positions are int(coord * DMF) so we keep ~1/16 unit precision (same as
+//     N_EDITENT); cpuv values are int(coord * 1000) for ~0.001 texel precision.
+// ---
+#define PATCH_NET_POS_SCALE 16.0f   // matches DMF in fpsgame/game.h
+#define PATCH_NET_UV_SCALE  1000.0f
+
+bool getpatchstate(int idx, int &cols, int &rows, int &vslot, int &tess, vector<int> &ctrlbuf, vector<int> &uvbuf)
+{
+    if(!patches.inrange(idx)) return false;
+    bezpatch *p = patches[idx];
+    cols = p->cols; rows = p->rows; vslot = p->vslot; tess = p->tess;
+    int n = p->cols * p->rows;
+    loopi(n)
+    {
+        ctrlbuf.add(int(p->ctrl[i].x * PATCH_NET_POS_SCALE));
+        ctrlbuf.add(int(p->ctrl[i].y * PATCH_NET_POS_SCALE));
+        ctrlbuf.add(int(p->ctrl[i].z * PATCH_NET_POS_SCALE));
+    }
+    loopi(n)
+    {
+        uvbuf.add(int(p->cpuv[i].x * PATCH_NET_UV_SCALE));
+        uvbuf.add(int(p->cpuv[i].y * PATCH_NET_UV_SCALE));
+    }
+    return true;
+}
+
+// apply an UPSERT received over the network. If idx is past the end of patches, append; otherwise
+// replace the patch in place (preserving the index so subsequent edits target the same slot).
+// Drops the patch's baked lightmap because remote geometry might differ -- /calclight on any
+// client re-bakes (lightmaps don't sync per-edit; that's done via savemap or a future bake msg).
+void mppatchupsert(int idx, int cols, int rows, int vslot, int tess, const int *ctrl, int nctrl, const int *cpuv, int nuv)
+{
+    if(idx < 0 || idx > 0xFFFF) return;
+    if(cols < 3 || rows < 3 || cols > 99 || rows > 99 || !(cols&1) || !(rows&1)) return;
+    int n = cols * rows;
+    if(nctrl != 3*n || nuv != 2*n) return;
+    while(patches.length() <= idx) patches.add(new bezpatch);   // pad-create if needed
+    bezpatch *p = patches[idx];
+#ifndef STANDALONE
+    p->freelm();   // any local lightmap is now stale
+#endif
+    p->setdims(cols, rows);
+    p->vslot = vslot;
+    p->tess = clamp(tess, 1, 16);
+    loopi(n) p->ctrl[i] = vec(ctrl[3*i]/PATCH_NET_POS_SCALE, ctrl[3*i+1]/PATCH_NET_POS_SCALE, ctrl[3*i+2]/PATCH_NET_POS_SCALE);
+    loopi(n) p->cpuv[i] = vec2(cpuv[2*i]/PATCH_NET_UV_SCALE, cpuv[2*i+1]/PATCH_NET_UV_SCALE);
+    p->dirty = true;
+}
+
+#ifndef STANDALONE
+// forward decls -- patchcpsel/patchgroup are defined further down for the editor; mppatchdelete
+// needs them to update selections/hover state when a remote delete shifts indices.
+struct patchcpsel;
+extern vector<patchcpsel> patchgroup;
+extern int patchhover, patchhovercp, patchhoversurf;
+static void patchadjustselections_for_remove(int removedidx);
+#endif
+
+void mppatchdelete(int idx)
+{
+    if(!patches.inrange(idx)) return;
+#ifndef STANDALONE
+    patches[idx]->freelm();
+#endif
+    delete patches.remove(idx);
+#ifndef STANDALONE
+    patchadjustselections_for_remove(idx);
+#endif
+}
+
+void mppatchclear() { clearpatches(); }
+
+#ifndef STANDALONE   // re-open the editor-only section that starts above with `#ifndef STANDALONE`
+
+// game-module hooks for coop-edit broadcast (real impl in fpsgame/client.cpp, no-op stubs in
+// engine/serverengine.cpp). Each local patch edit calls one of these so other clients receive
+// the change via N_EDITPATCH.
+namespace game
+{
+    extern void patchedittrigger_upsert(int idx);
+    extern void patchedittrigger_delete(int idx);
+    extern void patchedittrigger_clear();
+}
+
+// Re-broadcast the full patches list (clear + upsert each). Called after undo/redo since those
+// can change any subset of patches and even count -- it's simpler than diffing.
+static void rebroadcast_all_patches()
+{
+    game::patchedittrigger_clear();
+    loopv(patches) game::patchedittrigger_upsert(i);
+}
 
 // The bake uses the tessellation grid directly (its tangents are derived from the active UV mapping, so the
 // baked lightmap and the rendered normal map stay consistent). Lightmap resolution = tessellation; raise
@@ -333,6 +487,109 @@ static int patchgroupfind(int p, int c) { loopv(patchgroup) if(patchgroup[i].pat
 // deselect all control points (called from cancelsel() so SPACE clears patches with everything else)
 void patchcancel() { patchgroup.setsize(0); }
 
+// when a remote delete (or any other op that pops a patch out of the array) lands, our local
+// patchhover / patchhoversurf / patchgroup may still reference the removed slot or higher indices --
+// drop or shift them so subsequent edits target the right patches.
+static void patchadjustselections_for_remove(int removedidx)
+{
+    if(patchhover == removedidx) { patchhover = patchhovercp = -1; }
+    else if(patchhover > removedidx) patchhover--;
+    if(patchhoversurf == removedidx) patchhoversurf = -1;
+    else if(patchhoversurf > removedidx) patchhoversurf--;
+    for(int i = patchgroup.length(); --i >= 0; )
+    {
+        if(patchgroup[i].patch == removedidx) patchgroup.remove(i);
+        else if(patchgroup[i].patch > removedidx) patchgroup[i].patch--;
+    }
+}
+
+// ---- undo/redo ------------------------------------------------------------
+
+// patchstate: the minimal editable description of one patch, snapshotted into the undo stack.
+// Tessellated geometry (verts/norms/tcs/...) is RE-DERIVED via tessellate() after restore, so
+// we don't pay for it here -- snapshot cost is ~150 bytes per patch for a 3x3 grid.
+struct patchstate
+{
+    int rows, cols, vslot, tess;
+    vector<vec> ctrl;
+    vector<vec2> cpuv;
+};
+struct patchundoentry { vector<patchstate> patches; int timestamp; };
+static vector<patchundoentry *> patchundos, patchredos;
+static const int PATCH_MAX_UNDOS = 256;
+
+static patchundoentry *patchsnapshot()
+{
+    patchundoentry *e = new patchundoentry;
+    e->timestamp = totalmillis;
+    loopv(patches)
+    {
+        bezpatch *p = patches[i];
+        patchstate &s = e->patches.add();
+        s.rows = p->rows; s.cols = p->cols; s.vslot = p->vslot; s.tess = p->tess;
+        loopvj(p->ctrl) s.ctrl.add(p->ctrl[j]);
+        loopvj(p->cpuv) s.cpuv.add(p->cpuv[j]);
+    }
+    return e;
+}
+
+// snapshot the current patches state into the undo stack before mutating. Clear the redo stack so
+// a fresh edit after a sequence of undos discards the future (standard undo semantics).
+void patchmakeundo()
+{
+    patchundoentry *e = patchsnapshot();
+    patchundos.add(e);
+    while(!patchredos.empty()) delete patchredos.pop();
+    while(patchundos.length() > PATCH_MAX_UNDOS) { delete patchundos[0]; patchundos.remove(0); }
+}
+
+static void patchrestore(patchundoentry *e)
+{
+    // rebuild patches[] from the snapshot. clears any selection that references a now-stale patch
+    // (the snapshot may have a different count than the current state).
+    clearpatches();
+    patchgroup.setsize(0);
+    loopv(e->patches)
+    {
+        const patchstate &s = e->patches[i];
+        bezpatch *p = new bezpatch;
+        p->setdims(s.cols, s.rows);
+        p->vslot = s.vslot;
+        p->tess = s.tess;
+        loopvj(s.ctrl) if(p->ctrl.inrange(j)) p->ctrl[j] = s.ctrl[j];
+        p->cpuv.setsize(0);
+        loopvj(s.cpuv) p->cpuv.add(s.cpuv[j]);
+        p->dirty = true;
+        patches.add(p);
+    }
+}
+
+// move the most-recent entry from `from` to `to` after swapping it with the current state.
+// Returns true if an entry was popped. Mirrors the pattern of swapundo in octaedit.cpp.
+static bool patchswapundo(vector<patchundoentry *> &from, vector<patchundoentry *> &to)
+{
+    if(from.empty()) return false;
+    patchundoentry *cur = patchsnapshot();
+    to.add(cur);
+    patchundoentry *e = from.pop();
+    patchrestore(e);
+    delete e;
+    return true;
+}
+
+bool patchundo_pop() { bool r = patchswapundo(patchundos, patchredos); if(r) rebroadcast_all_patches(); return r; }
+bool patchredo_pop() { bool r = patchswapundo(patchredos, patchundos); if(r) rebroadcast_all_patches(); return r; }
+
+// timestamp of the most-recent patch undo entry, or -1 if the stack is empty -- lets octaedit's
+// editundo/editredo decide whether a patch edit or a cube edit happened more recently.
+int patchundo_latest_ts() { return patchundos.empty() ? -1 : patchundos.last()->timestamp; }
+int patchredo_latest_ts() { return patchredos.empty() ? -1 : patchredos.last()->timestamp; }
+
+ICOMMAND(patchclearundos, "", (), {
+    while(!patchundos.empty()) delete patchundos.pop();
+    while(!patchredos.empty()) delete patchredos.pop();
+});
+
 // ---- creation -------------------------------------------------------------
 
 VARP(patchtess, 1, 4, 16);   // default subdivision level for new patches
@@ -343,6 +600,7 @@ VARP(patchtess, 1, 4, 16);   // default subdivision level for new patches
 ICOMMAND(newpatch, "i", (int *size),
 {
     if(noedit(true)) return;
+    patchmakeundo();
     int d = dimension(sel.orient);
     int dc = dimcoord(sel.orient);
     int g = sel.grid;
@@ -359,7 +617,20 @@ ICOMMAND(newpatch, "i", (int *size),
 
     bezpatch *p = new bezpatch;
     p->tess = patchtess;
-    p->vslot = currentedittex();                        // adopt the editor's current texture
+    // texture inheritance: like cube-extrude/subdivide, take the underlying face's texture when it
+    // is uniform across the selection; otherwise the default checkerboard (DEFAULT_GEOM, the engine's
+    // canonical fallback) so a mixed-texture face spawns a clearly-unstyled patch the user can re-
+    // texture deliberately. Require the candidate vslot to have at least one loaded sub-texture so
+    // calctexgen()/the shader's tex0 sampler don't deref a null Texture*.
+    extern int seluniformfacetex();
+    extern vector<VSlot *> vslots;
+    auto vslot_usable = [&](int idx) -> bool {
+        return vslots.inrange(idx) && vslots[idx]->slot && !vslots[idx]->slot->sts.empty() && vslots[idx]->slot->sts[0].t;
+    };
+    int facetex = seluniformfacetex();
+    if(vslot_usable(facetex)) p->vslot = facetex;
+    else if(vslot_usable(DEFAULT_GEOM)) p->vslot = DEFAULT_GEOM;
+    else p->vslot = currentedittex();
     loop(y, 3) loop(x, 3)
     {
         vec &cp = p->cp(x, y);
@@ -368,21 +639,74 @@ ICOMMAND(newpatch, "i", (int *size),
         cp[D[d]] = dplane + off;
     }
     p->dirty = true;
+    int newidx = patches.length();
     patches.add(p);
     extern void projectpatchuv_axis(bezpatch *p);
     projectpatchuv_axis(p);                     // default to axis projection (matches a coplanar cube face)
     conoutf("created patch %d (%d total)", patches.length()-1, patches.length());
+    game::patchedittrigger_upsert(newidx);
 });
 
 ICOMMAND(clearpatches, "", (),
 {
     if(noedit(true)) return;
     int n = patches.length();
+    if(n) patchmakeundo();
     clearpatches();
     conoutf("cleared %d patches", n);
+    game::patchedittrigger_clear();
 });
 
 ICOMMAND(patchcount, "", (), { conoutf("%d patches", patches.length()); intret(patches.length()); });
+
+// scripting helpers (cheap; used by autoexec / debug scripts, not bound in defaults.cfg).
+ICOMMAND(patchgetvslot, "i", (int *pi), { intret(patches.inrange(*pi) ? patches[*pi]->vslot : -1); });
+ICOMMAND(patchgetcols,  "i", (int *pi), { intret(patches.inrange(*pi) ? patches[*pi]->cols  : 0);  });
+ICOMMAND(patchgetrows,  "i", (int *pi), { intret(patches.inrange(*pi) ? patches[*pi]->rows  : 0);  });
+ICOMMAND(patchgetcp,    "iii", (int *pi, int *cp, int *axis), {
+    if(!patches.inrange(*pi) || !patches[*pi]->ctrl.inrange(*cp) || *axis < 0 || *axis > 2) { floatret(0); return; }
+    floatret(patches[*pi]->ctrl[*cp][*axis]);
+});
+// debug/test helper: prime patchhover state so patchextend can be exercised without mouse input.
+ICOMMAND(patchsethover, "iii", (int *pi, int *cp, int *orient), {
+    patchhover = *pi; patchhovercp = *cp; patchorient = *orient;
+});
+ICOMMAND(applypatchtex, "i", (int *v), { extern void patchedittex(int); patchedittex(*v); });
+ICOMMAND(patchselectall, "i", (int *pi), {
+    if(!patches.inrange(*pi)) return;
+    patchgroup.setsize(0);
+    bezpatch *p = patches[*pi];
+    loopv(p->ctrl) { patchcpsel s; s.patch = *pi; s.cp = i; patchgroup.add(s); }
+});
+// raycube against patches probe: returns distance from camera1->o along camera1->aim() to the
+// nearest world (octree+patch) hit, capped at 4096. Lets autoexec scripts verify patches actually
+// stop hitscans without spawning a real bullet.
+ICOMMAND(patchraytest, "", (), {
+    extern physent *camera1;
+    extern float raycube(const vec &o, const vec &ray, float radius, int mode, int size, extentity *t);
+    vec dir;
+    vecfromyawpitch(camera1->yaw, camera1->pitch, 1, 0, dir);
+    float d = raycube(camera1->o, dir, 4096.0f, RAY_CLIPMAT|RAY_ALPHAPOLY, 0, NULL);
+    conoutf("raycube dist=%.2f", d);
+    floatret(d);
+});
+
+// exposed so octaedit.cpp's edittex/edittex_ can route around the cube-selection codepath when patches
+// are the focus (avoids retexturing a stale cube selection and the "selection not in view" gate).
+bool haspatchsel() { return !patchgroup.empty(); }
+
+// the vslot used by the first selected patch (or -1 if none). edittex_ snaps curtexindex onto this
+// before advancing so the wheel moves AWAY from the patch's current texture -- same intent as gettex
+// for cubes (otherwise the scroll lands on texmru[0] which is often the patch's existing texture).
+int patchfirstvslot()
+{
+    loopv(patchgroup)
+    {
+        int pi = patchgroup[i].patch;
+        if(patches.inrange(pi)) return patches[pi]->vslot;
+    }
+    return -1;
+}
 
 // assign the editor's current texture/material to the hovered (or last) patch
 ICOMMAND(patchsettex, "", (),
@@ -416,13 +740,7 @@ void renderpatches()
     glDisable(GL_CULL_FACE);     // patches are two-sided until per-face culling settles in a later phase
     glDisable(GL_BLEND);
 
-    // forward sun + ambient (used by unbaked patches; baked patches sample their RNM lightmaps instead)
-    GLOBALPARAM(psundir, sunlightdir);
-    GLOBALPARAMF(psun, sunlightcolor.x/255.0f*sunlightscale, sunlightcolor.y/255.0f*sunlightscale, sunlightcolor.z/255.0f*sunlightscale);
-    // flat ambient floor for unbaked patches: visible grey rather than near-black before /calclight
-    GLOBALPARAMF(pambient, max(max(ambientcolor.x, skylightcolor.x)/255.0f, 0.35f),
-                            max(max(ambientcolor.y, skylightcolor.y)/255.0f, 0.35f),
-                            max(max(ambientcolor.z, skylightcolor.z)/255.0f, 0.35f));
+    // psun/pambient/psundir for the unbaked path are set per-patch inside the loop below.
 
     gle::defvertex();
     gle::defnormal();
@@ -439,8 +757,77 @@ void renderpatches()
         VSlot &vs = lookupvslot(p->vslot, true);
         Slot &s = *vs.slot;
         Texture *diffuse = s.sts.inrange(0) ? s.sts[0].t : notexture;
-        Texture *norm = slottex(s, TEX_NORMAL), *glow = slottex(s, TEX_GLOW), *spec = slottex(s, TEX_SPEC);
+        Texture *norm = slottex(s, TEX_NORMAL), *glow = slottex(s, TEX_GLOW);
+        // texmask reflects the slot's textures including ones combined into siblings (Sauer packs
+        // spec into the diffuse's alpha and depth into the normal map's alpha at load time, so
+        // slottex(_, TEX_SPEC) returns NULL even when the slot HAS a spec map). The world shader
+        // detects spec via the "S" build option which is just `texmask & (1<<TEX_SPEC)` -- mirror
+        // that here so patches get the same spec contribution as cubes for combined-slot textures.
+        bool hasspec = (s.texmask & (1<<TEX_SPEC)) != 0;
         bool baked = p->lmtex[0] != 0;
+        // IMPORTANT: SETSHADER's flushparams() pushes the CURRENT global-param state to the new shader's
+        // uniforms; any GLOBALPARAMF call AFTER SETSHADER won't reach the shader until the next bind.
+        // So compute and set all our globals first, THEN SETSHADER, THEN bind textures and draw.
+        GLOBALPARAMF(pcolor, 2*vs.colorscale.x, 2*vs.colorscale.y, 2*vs.colorscale.z, 1.0f);   // 2x overbright, like world surfaces
+        GLOBALPARAMF(pbump, norm ? 1.0f : 0.0f);
+        GLOBALPARAMF(pglow, glow ? 1.0f : 0.0f);
+        // LDR-mode parity: RNM bakes the cos-modulated radiance per basis (HDR storage), so patches
+        // come out ~1.5x brighter than the LDR cubes for the same scene. The cube path caps lmc at
+        // 1.0 storage then multiplies by dot(lmlv,bump) at render; we don't have lmlv so just scale
+        // the reconstructed lm. Empirical: pixel-diff against a cube-at-same-position reference (see
+        // hdrhome/screenshot/reference_specular_patch.png) gave a ~1.5x ratio for this map.
+        extern int hdrlightmaps;
+        // empirical fit: RNM-baked patch lm is ~1.2x the cube's LDR-clamped lm*dot(lmlv,bump) after
+        // we synthesize lmlv from the basis maps in the shader. Without the synthesis it was ~1.5x.
+        // See hdrhome/screenshot/{reference,current,diff}_specular_patch.png for the empirical fit.
+        GLOBALPARAMF(pldrscale, hdrlightmaps ? 1.0f : 0.95f);
+        // psun reaches both shaders: bezpatch uses it for the diffuse-sun term, bezpatchlm uses it to
+        // scale the spec peak up to cube-LDR brightness (RNM's `lm` blend dims it). Plain 1x sun colour
+        // here; bezpatchlm applies its own overbright factor.
+        GLOBALPARAM(psundir, sunlightdir);
+        GLOBALPARAMF(psun, sunlightcolor.x/255.0f*sunlightscale,
+                           sunlightcolor.y/255.0f*sunlightscale,
+                           sunlightcolor.z/255.0f*sunlightscale);
+        if(baked)
+        {
+            GLOBALPARAMF(pspec, hasspec ? 1.0f : 0.0f);
+            bool height = (s.texmask & (1<<TEX_DEPTH)) != 0;
+            GLOBALPARAMF(pparallax, height ? 0.06f : 0.0f, height ? -0.03f : 0.0f);
+        }
+        else
+        {
+            // unbaked fallback (forward bezpatch shader): smooth sun + ambient.
+            float sx = sunlightcolor.x/255.0f*sunlightscale,
+                  sy = sunlightcolor.y/255.0f*sunlightscale,
+                  sz = sunlightcolor.z/255.0f*sunlightscale;
+            // ambient floor of 0.25: the world-shader path uses ambientcolor directly (typically dark);
+            // for unbaked patches we lift it so they're not invisible until calclight, but don't go so
+            // bright that they look out-of-place. A baked patch will replace this with proper RNM math.
+            float ax = max(max(ambientcolor.x, skylightcolor.x)/255.0f, 0.25f),
+                  ay = max(max(ambientcolor.y, skylightcolor.y)/255.0f, 0.25f),
+                  az = max(max(ambientcolor.z, skylightcolor.z)/255.0f, 0.25f);
+            if(haslightprobes())
+            {
+                // sample the baked probe grid at the patch centre, lifted off the surface (like
+                // bakemapmodelprobes does for items) so we don't hit a buried/solid grid cell.
+                vec center; float r;
+                p->boundsphere(center, r);
+                vec n(0, 0, 0);
+                loopvj(p->norms) n.add(p->norms[j]);
+                if(!n.iszero()) { n.normalize(); center.add(vec(n).mul(4.0f)); } else center.z += 4.0f;
+                vec faces[6];
+                getprobecube(center, faces);
+                vec avg(0, 0, 0);
+                loopk(6) avg.add(faces[k]);
+                avg.div(6*255.0f);
+                ax = avg.x; ay = avg.y; az = avg.z;
+                sx = sy = sz = 0;   // the probe already contains the baked sun + sky + bounce
+            }
+            // psundir/psun set above (used by both shaders); re-set psun here only if the probe
+            // path overrode them to 0 to avoid double-counting baked sun.
+            if(haslightprobes()) GLOBALPARAMF(psun, sx, sy, sz);
+            GLOBALPARAMF(pambient, ax, ay, az);
+        }
         if(baked) SETSHADER(bezpatchlm); else SETSHADER(bezpatch);
         glActiveTexture_(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, diffuse->id);
         glActiveTexture_(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, (norm ? norm : notexture)->id);
@@ -448,15 +835,10 @@ void renderpatches()
         if(baked)
         {
             loopk(3) { glActiveTexture_(GL_TEXTURE3+k); glBindTexture(GL_TEXTURE_2D, p->lmtex[k]); }
-            glActiveTexture_(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, (spec ? spec : notexture)->id);
-            GLOBALPARAMF(pspec, spec ? 1.0f : 0.0f);
-            bool height = (s.texmask & (1<<TEX_DEPTH)) != 0;
-            GLOBALPARAMF(pparallax, height ? 0.06f : 0.0f, height ? -0.03f : 0.0f);
+            // spec is packed into the diffuse texture's alpha channel by the engine's slot combine
+            // (see VSlot::combinealpha); the patch shader reads it from tex0.a -- no separate sampler needed.
         }
         glActiveTexture_(GL_TEXTURE0);
-        GLOBALPARAMF(pcolor, 2*vs.colorscale.x, 2*vs.colorscale.y, 2*vs.colorscale.z, 1.0f);   // 2x overbright, like world surfaces
-        GLOBALPARAMF(pbump, norm ? 1.0f : 0.0f);
-        GLOBALPARAMF(pglow, glow ? 1.0f : 0.0f);
         gle::begin(GL_TRIANGLES);
         loopvj(p->tris)
         {
@@ -551,10 +933,49 @@ float raypatchcp(const vec &o, const vec &ray)
 // until /calclight re-bakes). UV/texture changes keep the lightmap.
 static void invalidatepatch(bezpatch *p) { p->dirty = true; p->freelm(); }
 
+// apply a vslot to every distinct patch in the current control-point selection (called from edittex
+// in octaedit.cpp so Y+scroll and the F2 browser retexture selected patches alongside cube faces).
+// re-projects UVs from the new slot and clears the patch's lightmap (texture change is a material change,
+// so the bake needs to re-emit colour-modulated radiance).
+void patchedittex(int vslot)
+{
+    if(patchgroup.empty()) return;
+    // lookupvslot(_, true) loads/links the slot lazily, so a vslot that's known but not yet uploaded
+    // here (rare -- typically a slot the user just touched) becomes usable before projectpatchuv_axis
+    // calls calctexgen on it. Guard for a NULL slot or empty sts to avoid the crash that bit newpatch.
+    extern vector<VSlot *> vslots;
+    if(!vslots.inrange(vslot)) { conoutf(CON_ERROR, "patchedittex: vslot %d out of range", vslot); return; }
+    VSlot &vs = lookupvslot(vslot, true);
+    if(!vs.slot || vs.slot->sts.empty() || !vs.slot->sts[0].t)
+    {
+        conoutf(CON_ERROR, "patchedittex: vslot %d has no loaded texture", vslot);
+        return;
+    }
+    patchmakeundo();
+    vector<int> uniq;
+    loopv(patchgroup)
+    {
+        int pi = patchgroup[i].patch;
+        if(patches.inrange(pi) && uniq.find(pi) < 0) uniq.add(pi);
+    }
+    extern void projectpatchuv_axis(bezpatch *p);
+    loopv(uniq)
+    {
+        bezpatch *p = patches[uniq[i]];
+        p->vslot = vslot;
+        invalidatepatch(p);
+        projectpatchuv_axis(p);
+    }
+    if(uniq.length()) conoutf("patch tex applied to %d patch%s", uniq.length(), uniq.length()==1 ? "" : "es");
+    loopv(uniq) game::patchedittrigger_upsert(uniq[i]);
+}
+
 // move all selected control points by a delta in the R[d]/C[d] plane (called when dragging an entity too,
-// so a mixed entity+control-point selection moves together)
+// so a mixed entity+control-point selection moves together). Broadcasts every modified patch once per
+// drag-frame -- matches how entity dragging syncs (per-frame N_EDITENT).
 void movepatchgroup(int d, float dr, float dc)
 {
+    vector<int> uniq;
     loopv(patchgroup)
     {
         patchcpsel &s = patchgroup[i];
@@ -563,7 +984,9 @@ void movepatchgroup(int d, float dr, float dc)
         cc[R[d]] += dr;
         cc[C[d]] += dc;
         invalidatepatch(patches[s.patch]);
+        if(uniq.find(s.patch) < 0) uniq.add(s.patch);
     }
+    loopv(uniq) game::patchedittrigger_upsert(uniq[i]);
 }
 
 // move the whole selected control-point group by the delta of the focus point (the just-clicked one),
@@ -655,6 +1078,9 @@ void renderpatchhandles()
 static void patchstartmove(bool add)
 {
     if(noedit(true) || patchmoving) { if(patchmoving) return; patchmoving = 0; return; }
+    // snapshot at drag start (not every frame during the drag) so U undoes the entire drag as one step.
+    bool willmove = (patchhover >= 0) || patches.inrange(patchhoversurf);
+    if(willmove) patchmakeundo();
     if(patchhover >= 0)   // a control-point handle
     {
         if(!add)   // left click: this control point becomes the ONLY selection
@@ -695,19 +1121,197 @@ static bezpatch *activepatch()
     return patches.empty() ? NULL : patches.last();
 }
 
-// grow/shrink by whole biquadratic sub-patches (+/-2 control points per axis), Quake3/Radiant style
+// Extrude one edge of the patch by `delta` whole sub-patches (each = 2 control points), linearly
+// extrapolating the new CPs from the existing edge so they land in the patch's plane instead of at
+// world origin. `edge` is 0=-U (left), 1=+U (right), 2=-V (bottom), 3=+V (top). delta>0 grows,
+// delta<0 shrinks (just drops outer CPs). Returns false if the result would fall outside [3..99].
+static bool patchextrude(bezpatch *p, int edge, int delta)
+{
+    if(delta == 0) return false;
+    int oc = p->cols, orr = p->rows;
+    int nc = oc, nr = orr;
+    if(edge < 2) nc = clamp(oc + 2*delta, 3, 99); else nr = clamp(orr + 2*delta, 3, 99);
+    if(!(nc&1)) nc--;
+    if(!(nr&1)) nr--;
+    if(nc == oc && nr == orr) return false;
+
+    // Snapshot the old control mesh so we can re-pack into the resized buffer with the right shift.
+    vector<vec>  oldctrl; loopv(p->ctrl) oldctrl.add(p->ctrl[i]);
+    vector<vec2> olduv;   loopv(p->cpuv) olduv.add(p->cpuv[i]);
+    p->setdims(nc, nr);   // resizes ctrl/cpuv; we re-fill below from oldctrl.
+    auto src   = [&](int x, int y) -> vec   { return oldctrl[y*oc + x]; };
+    auto srcuv = [&](int x, int y) -> vec2  { return olduv.inrange(y*oc + x) ? olduv[y*oc + x] : vec2(0, 0); };
+
+    // SHIFT: for the negative-side edges (-U, -V) growing means moving existing CPs to higher
+    // indices (so the new ones land at x/y=0); for the same edges shrinking we DROP CPs from the
+    // start instead -- so the existing CPs effectively shift to LOWER indices (the rest get cut).
+    // We unify both with a single signed shift: dst[x,y] = src[x-xshift, y-yshift]. xshift>0 for
+    // -U grow, xshift<0 for -U shrink, 0 for the +U side (growth is at the end, no shift).
+    int xshift = 0, yshift = 0;
+    if(edge == 0) xshift = nc  - oc;
+    if(edge == 2) yshift = nr  - orr;
+
+    // Copy region: every (x, y) in the new grid that has a valid source position (x - xshift,
+    // y - yshift) within the old grid. max/min handle both positive and negative shifts safely
+    // so we never index a negative slot.
+    int xstart = max(0, xshift), xend = min(nc, oc + xshift);
+    int ystart = max(0, yshift), yend = min(nr, orr + yshift);
+    for(int y = ystart; y < yend; y++) for(int x = xstart; x < xend; x++)
+    {
+        p->cp(x, y) = src(x - xshift, y - yshift);
+        if(p->cpuv.inrange(y*nc + x)) p->uv(x, y) = srcuv(x - xshift, y - yshift);
+    }
+
+    // Fill the freshly-grown CPs (only when delta>0; shrink has no new CPs to populate). For each
+    // new column/row k beyond the old edge, new_cp = edge_cp + k * (edge_cp - inner_cp): a linear
+    // extrapolation of the surface slope so a flat patch stays flat and a curved one continues
+    // along its tangent. Users can fine-tune by dragging.
+    if(delta > 0)
+    {
+        if(edge == 1)        // +U: new x in [oc..nc)
+        {
+            loop(y, orr)
+            {
+                vec  eedge = src(oc-1, y), einner = src(max(oc-2, 0), y);
+                vec  d   = vec(eedge).sub(einner);
+                vec2 uve = srcuv(oc-1, y), uvi    = srcuv(max(oc-2, 0), y);
+                vec2 duv = vec2(uve).sub(uvi);
+                for(int x = oc; x < nc; x++)
+                {
+                    int k = x - (oc-1);
+                    p->cp(x, y) = vec(eedge).add(vec(d).mul(float(k)));
+                    if(p->cpuv.inrange(y*nc + x)) p->uv(x, y) = vec2(uve).add(vec2(duv).mul(float(k)));
+                }
+            }
+        }
+        else if(edge == 0)   // -U: new x in [0..xshift); existing CPs already shifted into [xshift..nc)
+        {
+            loop(y, orr)
+            {
+                vec  eedge = src(0, y), einner = src(min(1, oc-1), y);
+                vec  d   = vec(eedge).sub(einner);
+                vec2 uve = srcuv(0, y), uvi    = srcuv(min(1, oc-1), y);
+                vec2 duv = vec2(uve).sub(uvi);
+                loop(x, xshift)
+                {
+                    int k = xshift - x;   // furthest-out CP gets the largest stride
+                    p->cp(x, y) = vec(eedge).add(vec(d).mul(float(k)));
+                    if(p->cpuv.inrange(y*nc + x)) p->uv(x, y) = vec2(uve).add(vec2(duv).mul(float(k)));
+                }
+            }
+        }
+        else if(edge == 3)   // +V
+        {
+            loop(x, oc)
+            {
+                vec  eedge = src(x, orr-1), einner = src(x, max(orr-2, 0));
+                vec  d   = vec(eedge).sub(einner);
+                vec2 uve = srcuv(x, orr-1), uvi    = srcuv(x, max(orr-2, 0));
+                vec2 duv = vec2(uve).sub(uvi);
+                for(int y = orr; y < nr; y++)
+                {
+                    int k = y - (orr-1);
+                    p->cp(x, y) = vec(eedge).add(vec(d).mul(float(k)));
+                    if(p->cpuv.inrange(y*nc + x)) p->uv(x, y) = vec2(uve).add(vec2(duv).mul(float(k)));
+                }
+            }
+        }
+        else if(edge == 2)   // -V
+        {
+            loop(x, oc)
+            {
+                vec  eedge = src(x, 0), einner = src(x, min(1, orr-1));
+                vec  d   = vec(eedge).sub(einner);
+                vec2 uve = srcuv(x, 0), uvi    = srcuv(x, min(1, orr-1));
+                vec2 duv = vec2(uve).sub(uvi);
+                loop(y, yshift)
+                {
+                    int k = yshift - y;
+                    p->cp(x, y) = vec(eedge).add(vec(d).mul(float(k)));
+                    if(p->cpuv.inrange(y*nc + x)) p->uv(x, y) = vec2(uve).add(vec2(duv).mul(float(k)));
+                }
+            }
+        }
+    }
+    p->dirty = true;
+    return true;
+}
+
+// Decide which edge a CP belongs to. Non-edge CPs return -1. Corners (on two edges) are
+// disambiguated by the box face the cursor is on (patchorient): the world axis of that face's
+// normal picks the edge whose direction most aligns with it.
+static int patchedge_for_cp(bezpatch *p, int cpx, int cpy, int orient)
+{
+    bool left = (cpx == 0), right = (cpx == p->cols-1);
+    bool bot  = (cpy == 0), top   = (cpy == p->rows-1);
+    int hcount = (left ? 1 : 0) + (right ? 1 : 0) + (bot ? 1 : 0) + (top ? 1 : 0);
+    if(hcount == 0) return -1;
+    // Non-corner edge: only one of the four is true (or two from a thin 3xN patch -- we still
+    // prefer U vs V by patchorient to be safe).
+    int worldaxis = dimension(orient);
+    // average U direction (across rows, ctrl[1,y] - ctrl[0,y]) and V direction
+    vec udir(0, 0, 0), vdir(0, 0, 0);
+    int us = 0, vs = 0;
+    if(p->cols >= 2) loop(y, p->rows) { udir.add(vec(p->cp(p->cols-1, y)).sub(p->cp(0, y))); us++; }
+    if(p->rows >= 2) loop(x, p->cols) { vdir.add(vec(p->cp(x, p->rows-1)).sub(p->cp(x, 0))); vs++; }
+    if(us) udir.div(us);
+    if(vs) vdir.div(vs);
+    float ua = fabs(udir[worldaxis]), va = fabs(vdir[worldaxis]);
+    bool preferU = ua >= va;
+    if(left && right) preferU = true;     // 3-wide patch, no real -U/+U distinction; pick one
+    if(bot  && top)   preferU = false;
+    if(preferU)
+    {
+        if(left)  return 0;
+        if(right) return 1;
+    }
+    if(bot)  return 2;
+    if(top)  return 3;
+    if(left) return 0;
+    if(right) return 1;
+    return -1;
+}
+
+ICOMMAND(patchextend, "i", (int *dir),
+{
+    if(noedit(true)) { intret(0); return; }
+    if(!patches.inrange(patchhover) || patchhovercp < 0) { intret(0); return; }
+    bezpatch *p = patches[patchhover];
+    int cpx = patchhovercp % p->cols;
+    int cpy = patchhovercp / p->cols;
+    int edge = patchedge_for_cp(p, cpx, cpy, patchorient);
+    if(edge < 0) { intret(0); return; }     // not an edge CP -- let the caller fall through to cube edit
+    // The cursor is on an edge CP: the scroll is "ours" even if we can't actually grow/shrink
+    // (e.g. shrink at 3x3 minimum, grow at 99x99 max). Return 1 unconditionally so the cube edit
+    // path doesn't run too.
+    // Invert wheel direction: scroll-DOWN (`delta_do -1`) extends the patch, scroll-UP shrinks.
+    // defaults.cfg: WheelUp -> `delta_do 1`, WheelDown -> `delta_do -1`, so we want
+    // dir<0 -> grow and dir>0 -> shrink.
+    int delta = *dir > 0 ? -1 : 1;
+    patchmakeundo();                   // snapshot pre-change so U restores; harmless no-op snapshot at limits
+    if(patchextrude(p, edge, delta))
+    {
+        p->freelm();
+        game::patchedittrigger_upsert(patches.find(p));
+    }
+    else if(delta > 0) conoutf("patch already at max size (99x99)");
+    else conoutf("patch already at min size (3x3)");
+    intret(1);
+});
+
+// grow/shrink by whole biquadratic sub-patches (+/-2 control points per axis), Quake3/Radiant style.
+// Uses the smart extrude so new CPs land in line with the existing edge instead of at world origin.
 ICOMMAND(patchgrow, "ii", (int *du, int *dv),
 {
     if(noedit(true)) return;
     bezpatch *p = activepatch();
     if(!p) { conoutf("no patch"); return; }
-    int nc = clamp(p->cols + 2*(*du), 3, 99);
-    int nr = clamp(p->rows + 2*(*dv), 3, 99);
-    if(!(nc&1)) nc--;
-    if(!(nr&1)) nr--;
-    p->setdims(nc, nr);
+    patchmakeundo();
+    if(*du) patchextrude(p, 1, *du);   // +U side
+    if(*dv) patchextrude(p, 3, *dv);   // +V side
     p->freelm();
     conoutf("patch grid %dx%d", p->cols, p->rows);
+    game::patchedittrigger_upsert(patches.find(p));
 });
 
 // set one control point explicitly (scripting + basis for fix/align commands)
@@ -715,9 +1319,11 @@ ICOMMAND(patchcp, "iifff", (int *patch, int *cp, float *x, float *y, float *z),
 {
     if(noedit(true)) return;
     if(!patches.inrange(*patch) || !patches[*patch]->ctrl.inrange(*cp)) return;
+    patchmakeundo();
     patches[*patch]->ctrl[*cp] = vec(*x, *y, *z);
     patches[*patch]->dirty = true;
     patches[*patch]->freelm();
+    game::patchedittrigger_upsert(*patch);
 });
 
 // set a patch's texture/material vslot directly (scripting/testing)
@@ -725,8 +1331,10 @@ ICOMMAND(patchsetvslot, "ii", (int *patch, int *vslot),
 {
     if(noedit(true)) return;
     if(!patches.inrange(*patch)) return;
+    patchmakeundo();
     patches[*patch]->vslot = *vslot;
     patches[*patch]->dirty = true;   // texture change keeps the lightmap (lighting is independent of diffuse)
+    game::patchedittrigger_upsert(*patch);
 });
 
 // move a control point by a delta (scripting/testing)
@@ -734,9 +1342,11 @@ ICOMMAND(patchnudge, "iifff", (int *patch, int *cp, float *dx, float *dy, float 
 {
     if(noedit(true)) return;
     if(!patches.inrange(*patch) || !patches[*patch]->ctrl.inrange(*cp)) return;
+    patchmakeundo();
     patches[*patch]->ctrl[*cp].add(vec(*dx, *dy, *dz));
     patches[*patch]->dirty = true;
     patches[*patch]->freelm();
+    game::patchedittrigger_upsert(*patch);
 });
 
 // ---- texture alignment: recompute the stored control-point UVs (GtkRadiant-style) ----------------
@@ -769,18 +1379,20 @@ static void naturalpatchuv(bezpatch *p)
     p->dirty = true;
 }
 
-ICOMMAND(patchprojaxis, "", (), { if(noedit(true)) return; bezpatch *p = activepatch(); if(p) projectpatchuv_axis(p); });
-ICOMMAND(patchnaturalize, "", (), { if(noedit(true)) return; bezpatch *p = activepatch(); if(p) naturalpatchuv(p); });
+ICOMMAND(patchprojaxis, "", (), { if(noedit(true)) return; bezpatch *p = activepatch(); if(p) { patchmakeundo(); projectpatchuv_axis(p); game::patchedittrigger_upsert(patches.find(p)); } });
+ICOMMAND(patchnaturalize, "", (), { if(noedit(true)) return; bezpatch *p = activepatch(); if(p) { patchmakeundo(); naturalpatchuv(p); game::patchedittrigger_upsert(patches.find(p)); } });
 ICOMMAND(patchfit, "ff", (float *tu, float *tv),
 {
     if(noedit(true)) return;
     bezpatch *p = activepatch();
     if(!p) return;
+    patchmakeundo();
     float su = *tu > 0 ? *tu : 1;
     float sv = *tv > 0 ? *tv : 1;
     loop(y, p->rows) loop(x, p->cols)
         p->uv(x, y) = vec2(su*x/max(p->cols-1, 1), sv*y/max(p->rows-1, 1));
     p->dirty = true;
+    game::patchedittrigger_upsert(patches.find(p));
 });
 
 // ---- geometry fix commands ----------------------------------------------------------------------
@@ -810,6 +1422,7 @@ ICOMMAND(patchrotate, "i", (int *dir),
         c.div(p->ctrl.length());                   // pivot about the patch centre
     }
     else { intret(0); return; }
+    patchmakeundo();
     int a0 = (d+1)%3;
     int a1 = (d+2)%3;
     loopv(p->ctrl)
@@ -821,6 +1434,42 @@ ICOMMAND(patchrotate, "i", (int *dir),
         p->ctrl[i] = vec(c).add(r);
     }
     invalidatepatch(p);
+    game::patchedittrigger_upsert(patches.find(p));
+    intret(1);
+});
+
+// mirror the hovered patch across the plane through the crosshair-pointed control point box face.
+// Pointing at a control-point face -> plane through the CP, perpendicular to the face's world-axis
+// normal. Pointing at the patch body -> plane through the patch centre, perpendicular to the surface
+// normal's dominant axis. Each CP's coordinate along that axis becomes (2*plane - coord). Reflection
+// reverses the surface orientation; the tessellator's winding handles that automatically. Returns 1
+// when it flipped a patch so the X edit binding can fall through to cube/entity flip otherwise.
+ICOMMAND(patchflip, "", (),
+{
+    if(noedit(true)) { intret(0); return; }
+    bezpatch *p = NULL;
+    int d = 2;
+    float pcoord = 0;
+    if(patches.inrange(patchhover) && patches[patchhover]->ctrl.inrange(patchhovercp))
+    {
+        p = patches[patchhover];
+        d = dimension(patchorient);
+        pcoord = p->ctrl[patchhovercp][d];
+    }
+    else if(patches.inrange(patchhoversurf))
+    {
+        p = patches[patchhoversurf];
+        vec a(fabs(patchsurfnormal.x), fabs(patchsurfnormal.y), fabs(patchsurfnormal.z));
+        d = a.x >= a.y && a.x >= a.z ? 0 : (a.y >= a.z ? 1 : 2);
+        // plane through patch centre on axis d
+        loopv(p->ctrl) pcoord += p->ctrl[i][d];
+        pcoord /= p->ctrl.length();
+    }
+    else { intret(0); return; }
+    patchmakeundo();
+    loopv(p->ctrl) p->ctrl[i][d] = 2.0f*pcoord - p->ctrl[i][d];
+    invalidatepatch(p);
+    game::patchedittrigger_upsert(patches.find(p));
     intret(1);
 });
 
@@ -830,12 +1479,14 @@ ICOMMAND(patchinvert, "", (),
     if(noedit(true)) return;
     bezpatch *p = activepatch();
     if(!p) return;
+    patchmakeundo();
     loop(y, p->rows) loop(x, p->cols/2)
     {
         swap(p->cp(x, y), p->cp(p->cols-1-x, y));
         swap(p->uv(x, y), p->uv(p->cols-1-x, y));
     }
     invalidatepatch(p);
+    game::patchedittrigger_upsert(patches.find(p));
 });
 
 // even out control-point spacing: each sub-patch midpoint moves to the average of its endpoints
@@ -849,6 +1500,7 @@ ICOMMAND(patchredisperse, "", (),
     for(int y = 1; y < p->rows; y += 2) loop(x, p->cols)
         p->cp(x, y) = vec(p->cp(x, y-1)).add(p->cp(x, y+1)).mul(0.5f);
     invalidatepatch(p);
+    game::patchedittrigger_upsert(patches.find(p));
 });
 
 // ---- delete / copy / paste ----------------------------------------------------------------------
@@ -863,55 +1515,102 @@ ICOMMAND(delpatch, "", (),
     loopv(patchgroup) if(patches.inrange(patchgroup[i].patch) && del.find(patches[patchgroup[i].patch]) < 0) del.add(patches[patchgroup[i].patch]);
     if(del.empty() && patches.inrange(patchhover)) del.add(patches[patchhover]);
     if(del.empty()) { intret(0); return; }
+    patchmakeundo();
+    // collect indices BEFORE removal so we can broadcast deletes; broadcast in DESCENDING order so
+    // each remote receiver applies them with the correct indices (they shift down as items are removed).
+    vector<int> delidx;
+    loopv(del) { int idx = patches.find(del[i]); if(idx >= 0) delidx.add(idx); }
+    delidx.sort();   // ascending
     loopv(del) { int idx = patches.find(del[i]); if(idx >= 0) { del[i]->freelm(); delete patches.remove(idx); } }
     patchgroup.setsize(0);
     patchhover = patchhovercp = -1;
     patchmoving = 0;
+    for(int i = delidx.length(); --i >= 0; ) game::patchedittrigger_delete(delidx[i]);
     intret(1);
 });
 
-// 1 when a patch control point is under the crosshair (so the edit copy/paste/del binds target the patch)
-ICOMMAND(patchhovering, "", (), { intret(patches.inrange(patchhover) ? 1 : 0); });
+// 1 when the C/V/DEL edit binds should target patches: either a control point is hovered, OR there
+// are selected patch CPs (so copying with only a body-click selection works without the user having
+// to keep the crosshair on a CP).
+ICOMMAND(patchhovering, "", (), { intret((patches.inrange(patchhover) || !patchgroup.empty()) ? 1 : 0); });
 
-static bezpatch patchclipboard;
-static bool haspatchclip = false;
+// patch clipboard: a list of (cols, rows, vslot, tess, ctrl, cpuv) tuples so copying a multi-patch
+// selection preserves their relative positions when pasted.
+struct patchclipentry
+{
+    int cols, rows, vslot, tess;
+    vector<vec> ctrl;
+    vector<vec2> cpuv;
+};
+static vector<patchclipentry> patchclipboard;
+
+static void copy_patch_into_clipboard(bezpatch *p)
+{
+    patchclipentry &e = patchclipboard.add();
+    e.cols = p->cols; e.rows = p->rows; e.vslot = p->vslot; e.tess = p->tess;
+    loopv(p->ctrl) e.ctrl.add(p->ctrl[i]);
+    loopv(p->cpuv) e.cpuv.add(p->cpuv[i]);
+}
 
 ICOMMAND(patchcopy, "", (),
 {
     if(noedit(true)) return;
-    bezpatch *p = activepatch();
-    if(!p) { conoutf("no patch"); return; }
-    patchclipboard.setdims(p->cols, p->rows);
-    patchclipboard.vslot = p->vslot;
-    patchclipboard.tess = p->tess;
-    loopv(p->ctrl) patchclipboard.ctrl[i] = p->ctrl[i];
-    loopv(p->cpuv) patchclipboard.cpuv[i] = p->cpuv[i];
-    haspatchclip = true;
-    conoutf("copied patch (%dx%d)", p->cols, p->rows);
+    patchclipboard.shrink(0);
+    // Selected patch CPs win: collect every distinct patch that has at least one selected CP.
+    // No selection? Fall back to the hovered/active patch so the legacy hover-and-C workflow still works.
+    vector<int> uniq;
+    loopv(patchgroup) if(patches.inrange(patchgroup[i].patch) && uniq.find(patchgroup[i].patch) < 0) uniq.add(patchgroup[i].patch);
+    if(uniq.empty()) { bezpatch *p = activepatch(); if(p) { copy_patch_into_clipboard(p); conoutf("copied patch (%dx%d)", p->cols, p->rows); return; } }
+    if(uniq.empty()) { conoutf("no patch"); return; }
+    loopv(uniq) copy_patch_into_clipboard(patches[uniq[i]]);
+    conoutf("copied %d patch%s", patchclipboard.length(), patchclipboard.length()==1 ? "" : "es");
 });
 
 ICOMMAND(patchpaste, "", (),
 {
-    if(noedit(true) || !haspatchclip) return;
-    bezpatch *p = new bezpatch;
-    p->setdims(patchclipboard.cols, patchclipboard.rows);
-    p->vslot = patchclipboard.vslot;
-    p->tess = patchclipboard.tess;
-    loopv(p->ctrl) p->ctrl[i] = patchclipboard.ctrl[i];
-    loopv(p->cpuv) p->cpuv[i] = patchclipboard.cpuv[i];
-    // translate so the patch's centre lands at the edit cursor (selected location)
-    vec centroid(0, 0, 0);
-    loopv(p->ctrl) centroid.add(p->ctrl[i]);
-    centroid.div(p->ctrl.length());
-    vec off = vec(sel.o).add(vec(sel.grid*0.5f, sel.grid*0.5f, sel.grid*0.5f)).sub(centroid);
-    loopv(p->ctrl) p->ctrl[i].add(off);
-    p->dirty = true;
-    int idx = patches.length();
-    patches.add(p);
-    // select the whole pasted patch so it's active and can be dragged into place
+    if(noedit(true) || patchclipboard.empty()) return;
+    patchmakeundo();
+    // Drop the pasted patch(es) onto the selected face of the selection volume, slightly offset
+    // outward -- same scheme newpatch uses for fresh patches (and dropentity for entities). For
+    // multi-patch clipboards the relative positions among the copies are preserved.
+    int d = dimension(sel.orient);
+    int dc = dimcoord(sel.orient);
+    int g = sel.grid;
+    vec spawnctr(sel.o);
+    spawnctr[R[d]] += sel.s[R[d]]*g*0.5f;
+    spawnctr[C[d]] += sel.s[C[d]]*g*0.5f;
+    spawnctr[D[d]] = sel.o[D[d]] + (dc ? sel.s[D[d]]*g : 0);
+    float off = (dc ? 1 : -1) * max(2.0f, g*0.5f);   // outward offset (same as newpatch)
+    spawnctr[D[d]] += off;
+    // combined centroid of all clipboard patches -> shift so the combined centre lands at spawnctr
+    vec ccentroid(0, 0, 0);
+    int total = 0;
+    loopv(patchclipboard) { loopvj(patchclipboard[i].ctrl) { ccentroid.add(patchclipboard[i].ctrl[j]); total++; } }
+    if(total) ccentroid.div(total);
+    vec shift = vec(spawnctr).sub(ccentroid);
     patchgroup.setsize(0);
-    loopv(p->ctrl) { patchcpsel &s = patchgroup.add(); s.patch = idx; s.cp = i; }
-    conoutf("pasted patch %d", idx);
+    loopv(patchclipboard)
+    {
+        patchclipentry &e = patchclipboard[i];
+        bezpatch *p = new bezpatch;
+        p->setdims(e.cols, e.rows);
+        p->vslot = e.vslot;
+        p->tess = e.tess;
+        loopvj(e.ctrl)
+        {
+            if(!p->ctrl.inrange(j)) break;
+            p->ctrl[j] = vec(e.ctrl[j]).add(shift);
+        }
+        p->cpuv.setsize(0);
+        loopvj(e.cpuv) p->cpuv.add(e.cpuv[j]);
+        p->dirty = true;
+        int idx = patches.length();
+        patches.add(p);
+        // select every pasted patch's CPs so the result is immediately draggable as a group
+        loopvj(p->ctrl) { patchcpsel &s = patchgroup.add(); s.patch = idx; s.cp = j; }
+        game::patchedittrigger_upsert(idx);
+    }
+    conoutf("pasted %d patch%s", patchclipboard.length(), patchclipboard.length()==1 ? "" : "es");
 });
 
 #endif // !STANDALONE

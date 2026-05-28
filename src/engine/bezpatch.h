@@ -26,8 +26,13 @@ struct bezpatch
     bool dirty;
 
     uint lmtex[3];           // baked 3-basis RNM HDR lightmap textures (0 = unbaked -> forward lighting)
+    // raw RGBE source bytes for the 3 basis lightmaps, kept after upload so the bake survives
+    // /savemap and coop-edit sync. NULL when the patch is unbaked. dims = lmw*lmh texels, 4 bytes per texel.
+    int lmw, lmh;
+    uchar *lmrgbe[3];
 
-    bezpatch() : cols(0), rows(0), vslot(0), tess(4), dirty(true) { lmtex[0] = lmtex[1] = lmtex[2] = 0; setdims(3, 3); }
+    bezpatch() : cols(0), rows(0), vslot(0), tess(4), dirty(true), lmw(0), lmh(0) { lmtex[0] = lmtex[1] = lmtex[2] = 0; lmrgbe[0] = lmrgbe[1] = lmrgbe[2] = NULL; setdims(3, 3); }
+    ~bezpatch() { loopk(3) if(lmrgbe[k]) delete[] lmrgbe[k]; }
 
     vec &cp(int x, int y) { return ctrl[y*cols + x]; }
     const vec &cp(int x, int y) const { return ctrl[y*cols + x]; }

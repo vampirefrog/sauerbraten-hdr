@@ -19,8 +19,18 @@ VAR(regenbluearmour, 0, 1, 1);
 
 extern ENetAddress masteraddress;
 
+// Bezier patch coop-edit apply hooks (engine/bezpatch.cpp). Declared at global scope so the server's
+// N_EDITPATCH handler can reach them through `using` below, sidestepping the server:: namespace.
+extern void mppatchupsert(int idx, int cols, int rows, int vslot, int tess, const int *ctrl, int nctrl, const int *cpuv, int nuv);
+extern void mppatchdelete(int idx);
+extern void mppatchclear();
+
 namespace server
 {
+    using ::mppatchupsert;
+    using ::mppatchdelete;
+    using ::mppatchclear;
+
     struct server_entity            // server side version of "entity" type
     {
         int type;
@@ -1748,7 +1758,7 @@ namespace server
         }
 
         uchar operator[](int msg) const { return msg >= 0 && msg < NUMMSG ? msgmask[msg] : 0; }
-    } msgfilter(-1, N_CONNECT, N_SERVINFO, N_INITCLIENT, N_WELCOME, N_MAPCHANGE, N_SERVMSG, N_DAMAGE, N_HITPUSH, N_SHOTFX, N_EXPLODEFX, N_DIED, N_SPAWNSTATE, N_FORCEDEATH, N_TEAMINFO, N_ITEMACC, N_ITEMSPAWN, N_TIMEUP, N_CDIS, N_CURRENTMASTER, N_PONG, N_RESUME, N_BASESCORE, N_BASEINFO, N_BASEREGEN, N_ANNOUNCE, N_SENDDEMOLIST, N_SENDDEMO, N_DEMOPLAYBACK, N_SENDMAP, N_DROPFLAG, N_SCOREFLAG, N_RETURNFLAG, N_RESETFLAG, N_INVISFLAG, N_CLIENT, N_AUTHCHAL, N_INITAI, N_EXPIRETOKENS, N_DROPTOKENS, N_STEALTOKENS, N_DEMOPACKET, -2, N_REMIP, N_NEWMAP, N_GETMAP, N_SENDMAP, N_CLIPBOARD, -3, N_EDITENT, N_EDITF, N_EDITT, N_EDITM, N_FLIP, N_COPY, N_PASTE, N_ROTATE, N_REPLACE, N_DELCUBE, N_EDITVAR, N_EDITVSLOT, N_UNDO, N_REDO, -4, N_POS, NUMMSG),
+    } msgfilter(-1, N_CONNECT, N_SERVINFO, N_INITCLIENT, N_WELCOME, N_MAPCHANGE, N_SERVMSG, N_DAMAGE, N_HITPUSH, N_SHOTFX, N_EXPLODEFX, N_DIED, N_SPAWNSTATE, N_FORCEDEATH, N_TEAMINFO, N_ITEMACC, N_ITEMSPAWN, N_TIMEUP, N_CDIS, N_CURRENTMASTER, N_PONG, N_RESUME, N_BASESCORE, N_BASEINFO, N_BASEREGEN, N_ANNOUNCE, N_SENDDEMOLIST, N_SENDDEMO, N_DEMOPLAYBACK, N_SENDMAP, N_DROPFLAG, N_SCOREFLAG, N_RETURNFLAG, N_RESETFLAG, N_INVISFLAG, N_CLIENT, N_AUTHCHAL, N_INITAI, N_EXPIRETOKENS, N_DROPTOKENS, N_STEALTOKENS, N_DEMOPACKET, -2, N_REMIP, N_NEWMAP, N_GETMAP, N_SENDMAP, N_CLIPBOARD, -3, N_EDITENT, N_EDITF, N_EDITT, N_EDITM, N_FLIP, N_COPY, N_PASTE, N_ROTATE, N_REPLACE, N_DELCUBE, N_EDITVAR, N_EDITVSLOT, N_EDITPATCH, N_UNDO, N_REDO, -4, N_POS, NUMMSG),
       connectfilter(-1, N_CONNECT, -2, N_AUTHANS, -3, N_PING, NUMMSG);
 
     int checktype(int type, clientinfo *ci)
@@ -4007,6 +4017,35 @@ namespace server
                 if(ci && serverhasmap && m_edit && ci->state.state != CS_SPECTATOR) { mpremip(false); mapdatadirty = true; }
                 if(ci && ci->state.state != CS_SPECTATOR) QUEUE_MSG;
                 break;
+
+            case N_EDITPATCH:
+            {
+                // Bezier patch upsert/delete/clear from a client. Parse, apply to the server's mirror
+                // of the patches list, and relay so other clients see the change. Subops:
+                //   0 = UPSERT(idx, cols, rows, vslot, tess, ctrl[3*cols*rows], cpuv[2*cols*rows])
+                //   1 = DELETE(idx)
+                //   2 = CLEAR (no args)
+                // QUEUE_MSG at the end relays unconditionally so spectators/no-map sessions still
+                // forward the change between editing clients.
+                int subop = getint(p);
+                bool canedit = ci && serverhasmap && m_edit && ci->state.state != CS_SPECTATOR;
+                if(subop == 0)
+                {
+                    int idx = getint(p), cols = getint(p), rows = getint(p), vslot = getint(p), tess = getint(p);
+                    if(cols < 3 || rows < 3 || cols > 99 || rows > 99 || !(cols&1) || !(rows&1)) break;
+                    int n = cols * rows, nc = 3*n, nu = 2*n;
+                    if(nc + nu > 64*64*5) break;   // sanity bound on payload size
+                    int *ctrl = new int[nc], *cpuv = new int[nu];
+                    loopi(nc) ctrl[i] = getint(p);
+                    loopi(nu) cpuv[i] = getint(p);
+                    if(canedit) { mppatchupsert(idx, cols, rows, vslot, tess, ctrl, nc, cpuv, nu); mapdatadirty = true; }
+                    delete[] ctrl; delete[] cpuv;
+                }
+                else if(subop == 1) { int idx = getint(p); if(canedit) { mppatchdelete(idx); mapdatadirty = true; } }
+                else if(subop == 2) { if(canedit) { mppatchclear(); mapdatadirty = true; } }
+                if(ci && ci->state.state != CS_SPECTATOR) QUEUE_MSG;
+                break;
+            }
 
             case N_UNDO:
             case N_REDO:

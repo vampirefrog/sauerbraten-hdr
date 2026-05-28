@@ -917,8 +917,32 @@ void swapundo(undolist &a, undolist &b, int op)
     forcenextundo();
 }
 
-void editundo() { swapundo(undos, redos, EDIT_UNDO); }
-void editredo() { swapundo(redos, undos, EDIT_REDO); }
+// patch edits maintain their own undo/redo stacks (bezpatch.cpp). Pop from whichever stack has
+// the most recent timestamp -- gives the user a single U/I that walks back through cube and patch
+// edits in the order they actually happened.
+#ifndef STANDALONE
+extern bool patchundo_pop();
+extern bool patchredo_pop();
+extern int patchundo_latest_ts();
+extern int patchredo_latest_ts();
+#endif
+
+void editundo()
+{
+#ifndef STANDALONE
+    int pts = patchundo_latest_ts(), cts = undos.empty() ? -1 : undos.last->timestamp;
+    if(pts >= 0 && pts >= cts) { patchundo_pop(); return; }
+#endif
+    swapundo(undos, redos, EDIT_UNDO);
+}
+void editredo()
+{
+#ifndef STANDALONE
+    int pts = patchredo_latest_ts(), cts = redos.empty() ? -1 : redos.last->timestamp;
+    if(pts >= 0 && pts >= cts) { patchredo_pop(); return; }
+#endif
+    swapundo(redos, undos, EDIT_REDO);
+}
 
 // guard against subdivision
 #define protectsel(f) { undoblock *_u = newundocube(sel); f; if(_u) { pasteundo(_u); freeundo(_u); } }
@@ -2516,16 +2540,48 @@ void edittex(int i, bool save = true)
     {
         loopvj(texmru) if(texmru[j]==lasttex) { curtexindex = j; break; }
     }
+#ifndef STANDALONE
+    // patch control points selected: route the texture change to those patches exclusively,
+    // leaving the (possibly stale) cube selection untouched. Y+scroll and the F2 browser both
+    // funnel through here.
+    extern bool haspatchsel();
+    extern void patchedittex(int vslot);
+    if(haspatchsel()) { patchedittex(i); return; }
+#endif
     mpedittex(i, allfaces, sel, true);
 }
 
 void edittex_(int *dir)
 {
+#ifndef STANDALONE
+    // when patches are selected, the texture wheel targets them -- bypass the cube selection's
+    // "not in view" gate so pointing at a patch (with no in-view cube selection) still works.
+    extern bool haspatchsel();
+    bool patchsel = haspatchsel();
+    if(!patchsel && noedit()) return;
+#else
+    bool patchsel = false;
     if(noedit()) return;
+#endif
     filltexlist();
     if(texmru.empty()) return;
     texpaneltimer = 5000;
-    if(!(lastsel==sel)) tofronttex();
+    // tofronttex is for the cube workflow: when the cube selection changes, the just-applied
+    // texture is bubbled to texmru[0] AND curtexindex is reset to -1. In patch-only mode there's
+    // no cube selection event to react to, so calling it on every wheel tick would perpetually
+    // pin curtexindex back to 0 and the patch would never advance past texmru[0].
+    if(!patchsel && !(lastsel==sel)) tofronttex();
+#ifndef STANDALONE
+    if(patchsel)
+    {
+        // snap curtexindex to the patch's current vslot so the first scroll lands on a NEIGHBOUR,
+        // not the patch's own texture (texmru[0] is the saved most-recent, which after a map load
+        // is typically the patch's vslot -- so without this snap, the first wheel tick is a no-op).
+        extern int patchfirstvslot();
+        int pv = patchfirstvslot();
+        if(pv >= 0) loopvj(texmru) if(texmru[j] == pv) { curtexindex = j; break; }
+    }
+#endif
     curtexindex = clamp(curtexindex<0 ? 0 : curtexindex+*dir, 0, texmru.length()-1);
     edittex(texmru[curtexindex], false);
 }
@@ -2567,6 +2623,24 @@ int currentedittex()
     filltexlist();
     int i = curtexindex < 0 ? 0 : curtexindex;
     return texmru.inrange(i) ? texmru[i] : 0;
+}
+
+// vslot of the selection's selected face, if all non-empty cubes on that face share one texture;
+// returns -1 if there's no consistent texture (mixed face, all-empty, or non-edit mode). Used by
+// patch spawn to inherit the underlying cube texture (mirrors how cube extrusion picks up its neighbour).
+int seluniformfacetex()
+{
+    if(noedit(true)) return -1;
+    int tex = -1;
+    bool first = true, uniform = true;
+    loopxyz(sel, sel.grid, {
+        if(isempty(c) && !c.children) continue;   // air cells contribute nothing
+        int t = c.texture[sel.orient];
+        if(first) { tex = t; first = false; }
+        else if(t != tex) uniform = false;
+    });
+    if(first || !uniform) return -1;            // no eligible faces, or mixed
+    return tex;
 }
 
 void gettexname(int *tex, int *subslot)

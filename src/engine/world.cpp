@@ -551,7 +551,15 @@ void entdrag(const vec &ray)
         c = (entselsnap ? g[C[d]] : v[C[d]]) - e.o[C[d]];
     );
 
-    if(entmoving==1) makeundoent();
+    if(entmoving==1)
+    {
+        makeundoent();
+#ifndef STANDALONE
+        extern bool haspatchsel();
+        extern void patchmakeundo();
+        if(haspatchsel()) patchmakeundo();   // also snapshot patches if a mixed selection is dragging
+#endif
+    }
     groupeditpure(e.o[R[d]] += r; e.o[C[d]] += c);
 #ifndef STANDALONE
     extern void movepatchgroup(int d, float dr, float dc);   // also drag any selected patch control points

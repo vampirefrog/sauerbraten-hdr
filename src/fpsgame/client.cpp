@@ -1,7 +1,19 @@
 #include "game.h"
 
+// Bezier patch coop-edit hooks (engine/bezpatch.cpp). Declared at global scope so the game::
+// namespace can `using` them without confusing C++ into thinking we want game::mp*.
+extern void mppatchupsert(int idx, int cols, int rows, int vslot, int tess, const int *ctrl, int nctrl, const int *cpuv, int nuv);
+extern void mppatchdelete(int idx);
+extern void mppatchclear();
+extern bool getpatchstate(int idx, int &cols, int &rows, int &vslot, int &tess, vector<int> &ctrlbuf, vector<int> &uvbuf);
+
 namespace game
 {
+    using ::mppatchupsert;
+    using ::mppatchdelete;
+    using ::mppatchclear;
+    using ::getpatchstate;
+
     VARP(minradarscale, 0, 384, 10000);
     VARP(maxradarscale, 1, 1024, 10000);
     VARP(radarteammates, 0, 1, 1);
@@ -744,6 +756,31 @@ namespace game
                 break;
             }
         }
+    }
+
+    // --- bezier patch coop-edit sync (N_EDITPATCH) ---
+    // The engine's patch edit commands (newpatch, delpatch, patch CP drag, retex, rotate, grow, paste)
+    // call these triggers; we pack the changed patch's full state (or just the index for delete/clear)
+    // and queue it for the server to mirror + relay to other clients. Subops: 0=UPSERT, 1=DELETE, 2=CLEAR.
+    void patchedittrigger_upsert(int idx)
+    {
+        if(!m_edit) return;
+        int cols, rows, vslot, tess;
+        vector<int> ctrlbuf, uvbuf;
+        if(!getpatchstate(idx, cols, rows, vslot, tess, ctrlbuf, uvbuf)) return;
+        addmsg(N_EDITPATCH, "ri6vv", /*subop=*/0, idx, cols, rows, vslot, tess,
+               ctrlbuf.length(), ctrlbuf.getbuf(),
+               uvbuf.length(),   uvbuf.getbuf());
+    }
+    void patchedittrigger_delete(int idx)
+    {
+        if(!m_edit) return;
+        addmsg(N_EDITPATCH, "ri2", /*subop=*/1, idx);
+    }
+    void patchedittrigger_clear()
+    {
+        if(!m_edit) return;
+        addmsg(N_EDITPATCH, "ri", /*subop=*/2);
     }
 
     void printvar(fpsent *d, ident *id)
@@ -1730,6 +1767,30 @@ namespace game
                 if(!d) return;
                 conoutf("%s remipped", colorname(d));
                 mpremip(false);
+                break;
+            }
+
+            case N_EDITPATCH:
+            {
+                // Receive a bezier patch upsert/delete/clear from another client. Apply directly to
+                // the local `patches` list -- the engine's mp* helpers handle the index bookkeeping
+                // (selection cleanup, etc.) and the apply path doesn't re-broadcast.
+                if(!d) return;
+                int subop = getint(p);
+                if(subop == 0)
+                {
+                    int idx = getint(p), cols = getint(p), rows = getint(p), vslot = getint(p), tess = getint(p);
+                    if(cols < 3 || rows < 3 || cols > 99 || rows > 99 || !(cols&1) || !(rows&1)) break;
+                    int n = cols * rows, nc = 3*n, nu = 2*n;
+                    if(nc + nu > 64*64*5) break;
+                    int *ctrl = new int[nc], *cpuv = new int[nu];
+                    loopi(nc) ctrl[i] = getint(p);
+                    loopi(nu) cpuv[i] = getint(p);
+                    mppatchupsert(idx, cols, rows, vslot, tess, ctrl, nc, cpuv, nu);
+                    delete[] ctrl; delete[] cpuv;
+                }
+                else if(subop == 1) { int idx = getint(p); mppatchdelete(idx); }
+                else if(subop == 2) { mppatchclear(); }
                 break;
             }
             case N_EDITENT:            // coop edit of ent

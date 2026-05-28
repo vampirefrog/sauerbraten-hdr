@@ -5,7 +5,7 @@ enum                            // hardcoded texture numbers
     DEFAULT_GEOM
 };
 
-#define MAPVERSION 36           // bump if map format changes, see worldio.cpp (34: HDR/RNM lightmaps + light probes; 35: bezier patches; 36: patch UVs)
+#define MAPVERSION 37           // bump if map format changes, see worldio.cpp (34: HDR/RNM lightmaps + light probes; 35: bezier patches; 36: patch UVs; 37: per-patch baked RNM lightmap bytes)
 
 struct octaheader
 {

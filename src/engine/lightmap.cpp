@@ -1333,13 +1333,19 @@ void bakepatchlights()
                 if(dogi) { vec g(0, 0, 0); calcgi(w, pos, wb, 0.5f, g, 1); rnm[k].add(g); }
             }
             // normalize the 3 basis to the diffuse magnitude (preserves directional contrast -> visible bump),
-            // then add flat sky -- the same scheme finishlightmap() uses for world RNM lightmaps.
+            // then floor by ambient -- mirrors finishlightmap's per-channel `max(r, ambient[c])`
+            // (used to be additive `+ amb`, which flattens the colour ratio of brighter lights toward
+            // neutral and made the patch look less saturated than its cube neighbour).
             float rawl = rnm[0].x+rnm[0].y+rnm[0].z + rnm[1].x+rnm[1].y+rnm[1].z + rnm[2].x+rnm[2].y+rnm[2].z;
             float dirl = max(cdir.x + cdir.y + cdir.z, 0.0f);
             float comp = rawl > 1.0f ? min(3.0f*dirl/rawl, 3.0f) : 0.0f;
             loopk(3)
             {
-                vec bb = vec(rnm[k]).mul(comp).add(amb).min(vec(2*255.0f, 2*255.0f, 2*255.0f));
+                vec bb = vec(rnm[k]).mul(comp);
+                bb.x = max(bb.x, amb.x);
+                bb.y = max(bb.y, amb.y);
+                bb.z = max(bb.z, amb.z);
+                bb.min(vec(2*255.0f, 2*255.0f, 2*255.0f));
                 encodergbe(bb.mul(1.0f/255.0f), &out[k][j*4]);
             }
         }

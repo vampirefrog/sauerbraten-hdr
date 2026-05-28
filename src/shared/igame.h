@@ -54,6 +54,12 @@ namespace game
     extern void physicstrigger(physent *d, bool local, int floorlevel, int waterlevel, int material = 0);
     extern void bounced(physent *d, const vec &surface);
     extern void edittrigger(const selinfo &sel, int op, int arg1 = 0, int arg2 = 0, int arg3 = 0, const VSlot *vs = NULL);
+    // Bezier patch coop-edit hooks: the engine calls these whenever a patch changes locally; the
+    // game/client implementation packs and sends an N_EDITPATCH so other clients (and the server's
+    // mirror of the patches list) stay in sync. The standalone build has no-op stubs.
+    extern void patchedittrigger_upsert(int idx);
+    extern void patchedittrigger_delete(int idx);
+    extern void patchedittrigger_clear();
     extern void vartrigger(ident *id);
     extern void dynentcollide(physent *d, physent *o, const vec &dir);
     extern const char *getclientmap();
