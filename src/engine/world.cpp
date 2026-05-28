@@ -816,6 +816,22 @@ ICOMMAND(entmoving, "b", (int *n),
     intret(entmoving);
 });
 
+// left-click variant: select ONLY the hovered entity (unless it's already in the selection, in which case
+// keep the group so a drag moves all of it), then move. entmoving keeps its add-to-selection behaviour.
+ICOMMAND(entmovingsel, "b", (int *n),
+{
+    if(*n >= 0)
+    {
+        if(!*n || enthover < 0 || noentedit()) entmoving = 0;
+        else if(!entmoving)
+        {
+            if(entgroup.find(enthover) < 0) { entgroup.setsize(0); entadd(enthover); }
+            entmoving = 1;
+        }
+    }
+    intret(entmoving);
+});
+
 void entpush(int *dir)
 {
     if(noentedit()) return;

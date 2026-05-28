@@ -590,8 +590,8 @@ void renderpatchhandles()
     else if(patches.inrange(patchhover)) drawpatchnet(patches[patchhover]);   // none selected: preview the hovered patch
 
     // markers are the blue PART_EDIT sparkles (renderparticles.cpp). Selected control points get a green
-    // box; the hovered one gets the red grab-face -- same convention as entity selection.
-    gle::colorub(0, 180, 0);
+    // box; the hovered one gets the red grab-face -- same colours as entity selection.
+    gle::colorub(0, 40, 0);
     loopv(patchgroup)
     {
         patchcpsel &s = patchgroup[i];
@@ -612,23 +612,26 @@ void renderpatchhandles()
     }
 }
 
-// clicking a control point adds it to the selection group (if not already in it) and starts a drag of the
-// whole group -- mirroring entmoving/entadd. The just-clicked point becomes the focus (group.last()).
-ICOMMAND(patchmoving, "b", (int *n),
+// make the hovered control point the focus (last in the group). add=false replaces the selection with
+// just it (unless it's already selected -> keep the group, so a drag moves the whole selection); add=true
+// adds it to the selection. Then starts a drag. Mirrors how we want entities to behave too.
+static void patchstartmove(bool add)
 {
-    if(*n >= 0)
+    if(patchhover < 0 || noedit(true)) { patchmoving = 0; return; }
+    if(patchmoving) return;
+    int idx = patchgroupfind(patchhover, patchhovercp);
+    if(idx >= 0) { patchcpsel s = patchgroup.remove(idx); patchgroup.add(s); }   // already selected -> focus it, keep group
+    else
     {
-        if(!*n || patchhover < 0 || noedit(true)) patchmoving = 0;
-        else if(!patchmoving)
-        {
-            int idx = patchgroupfind(patchhover, patchhovercp);
-            if(idx < 0) { patchcpsel &s = patchgroup.add(); s.patch = patchhover; s.cp = patchhovercp; }
-            else { patchcpsel s = patchgroup.remove(idx); patchgroup.add(s); }   // make it the focus
-            patchmoving = 1;
-        }
+        if(!add) patchgroup.setsize(0);                                          // left click: select only this point
+        patchcpsel &s = patchgroup.add();
+        s.patch = patchhover; s.cp = patchhovercp;
     }
-    intret(patchmoving);
-});
+    patchmoving = 1;
+}
+
+ICOMMAND(patchmoving,    "b", (int *n), { if(*n >= 0) { if(!*n) patchmoving = 0; else patchstartmove(false); } intret(patchmoving); });
+ICOMMAND(patchmovingadd, "b", (int *n), { if(*n >= 0) { if(!*n) patchmoving = 0; else patchstartmove(true);  } intret(patchmoving); });
 
 // active patch for ops/skeleton: the focus (last-selected) control point's patch, else the hovered, else last
 static bezpatch *activepatch()
