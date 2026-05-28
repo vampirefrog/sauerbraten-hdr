@@ -785,6 +785,31 @@ ICOMMAND(patchfit, "ff", (float *tu, float *tv),
 
 // ---- geometry fix commands ----------------------------------------------------------------------
 
+// rotate the hovered patch 90 degrees about the axis of the control-point box face under the crosshair
+// (R + mouse wheel). The rotation happens in the plane perpendicular to that face normal. Returns 1 if it
+// rotated a patch so the edit binding can fall through to cube/entity rotation otherwise.
+ICOMMAND(patchrotate, "i", (int *dir),
+{
+    if(noedit(true) || !patches.inrange(patchhover)) { intret(0); return; }
+    bezpatch *p = patches[patchhover];
+    int d = dimension(patchorient);
+    int a0 = (d+1)%3;
+    int a1 = (d+2)%3;
+    vec c(0, 0, 0);
+    loopv(p->ctrl) c.add(p->ctrl[i]);
+    c.div(p->ctrl.length());
+    loopv(p->ctrl)
+    {
+        vec r = vec(p->ctrl[i]).sub(c);
+        float r0 = r[a0];
+        float r1 = r[a1];
+        if(*dir > 0) { r[a0] = -r1; r[a1] = r0; } else { r[a0] = r1; r[a1] = -r0; }
+        p->ctrl[i] = vec(c).add(r);
+    }
+    invalidatepatch(p);
+    intret(1);
+});
+
 // flip the surface normals (reverse the u parametric direction; keeps UVs aligned)
 ICOMMAND(patchinvert, "", (),
 {
