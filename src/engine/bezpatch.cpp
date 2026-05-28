@@ -629,13 +629,18 @@ static void patchstartmove(bool add)
 {
     if(patchhover < 0 || noedit(true)) { patchmoving = 0; return; }
     if(patchmoving) return;
-    int idx = patchgroupfind(patchhover, patchhovercp);
-    if(idx >= 0) { patchcpsel s = patchgroup.remove(idx); patchgroup.add(s); }   // already selected -> focus it, keep group
-    else
+    if(!add)   // left click: this control point becomes the ONLY selection
     {
-        if(!add) { patchgroup.setsize(0); clearentgroup(); }                     // left click: select only this point
+        patchgroup.setsize(0);
+        clearentgroup();
         patchcpsel &s = patchgroup.add();
         s.patch = patchhover; s.cp = patchhovercp;
+    }
+    else       // right click: add to the selection (or just re-focus it if already selected)
+    {
+        int idx = patchgroupfind(patchhover, patchhovercp);
+        if(idx >= 0) { patchcpsel s = patchgroup.remove(idx); patchgroup.add(s); }
+        else { patchcpsel &s = patchgroup.add(); s.patch = patchhover; s.cp = patchhovercp; }
     }
     patchmoving = 1;
 }
