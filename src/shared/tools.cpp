@@ -20,6 +20,15 @@ void operator delete(void *p) { if(p) free(p); }
 
 void operator delete[](void *p) { if(p) free(p); }
 
+// C++17 sized-delete overloads. Sauer's custom global `operator new` allocates via plain malloc,
+// but C++17 lets the compiler emit calls to `operator delete(void*, size_t)` for ordinary `delete p`
+// expressions (when the static type is known). Without these explicit overloads the compiler may
+// route the deletion through the sized version while allocation came from the unsized one, which
+// AddressSanitizer flags as an "alloc-dealloc-mismatch (malloc vs operator delete)". The size
+// parameter is ignored -- both forms ultimately free the same pointer.
+void operator delete  (void *p, size_t) noexcept { if(p) free(p); }
+void operator delete[](void *p, size_t) noexcept { if(p) free(p); }
+
 void *operator new(size_t size, bool err)
 {
     void *p = malloc(size);
