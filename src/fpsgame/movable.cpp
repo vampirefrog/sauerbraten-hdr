@@ -303,23 +303,40 @@ namespace game
         sendclientpacket(p.finalize(), 1);
     }
 
-    // Every client runs full local physics so movables behave reasonably between authority
-    // snaps (smooth motion, player riding, basic collision feedback). The 20Hz N_MOVABLESTATE
-    // broadcasts from the lowest-clientnum authority then OVERWRITE positions + velocities at
-    // 50ms intervals, so any locally-computed divergence gets corrected before it can cascade
-    // (e.g. a non-authority platform reversing against a wrong-position barrel).
+    // ONE source of truth for movable physics: the lowest-clientnum authority runs the full
+    // simulation (collision, gravity, stacking, the explode timer, platform reversal on world
+    // collision). Non-authority clients DO NOT simulate -- they linearly extrapolate position
+    // from the last received velocity so motion stays smooth between the 20Hz snaps. Without
+    // local collision, the non-authority can't tunnel through anything, hit ghost barrels, or
+    // collide a platform with the wrong things: it just rides whatever the authority broadcasts.
     //
-    // Side effects that mutate state -- the explode timer firing, suicidemovable, hitmovable's
-    // damage path -- are gated to specific per-event authorities (shooter for damage, the
-    // falling player for suicide) so we don't get duplicate explosions even though everyone
-    // runs the physics loop.
+    // Shooter-side feedback still works: hitmovable's at==player1 branch sets m->vel locally,
+    // and the extrapolation below picks up that new velocity immediately, so the shooter sees
+    // their barrel react this frame even though the authority is the one who'll evolve the
+    // post-push physics. Same goes for triggerplatform: the local vel change is felt right away.
+    //
+    // Known trade-off: a non-authority player can't push a barrel by walking into it (no local
+    // collision) and pays ~50ms of round-trip lag for that kind of interaction. We'll layer
+    // optimisations (shooter-temporary-authority, predict-and-reconcile) on top once the basic
+    // physics is solid.
     void updatemovables(int curtime)
     {
         if(!curtime) return;
+        const bool isauth = ismovableauthority();
         loopv(movables)
         {
             movable *m = movables[i];
             if(m->state!=CS_ALIVE) continue;
+            if(!isauth)
+            {
+                if(!m->vel.iszero())
+                {
+                    m->o.add(vec(m->vel).mul(curtime/1000.0f));
+                    entinmap(m);
+                    updatedynentcache(m);
+                }
+                continue;
+            }
             if(m->etype==PLATFORM || m->etype==ELEVATOR)
             {
                 if(m->vel.iszero()) continue;
