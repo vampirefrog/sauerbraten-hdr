@@ -816,7 +816,19 @@ namespace server
 
     void updatemapdatacrc();
 
-    // map name announced to clients for the restored map = servermappath basename w/o .ogz
+    // Path to the sidecar file that stores the *original* map name the persisted .ogz was last
+    // serialised under. Without it, clients receiving the persisted map would only know it as
+    // "<servermappath basename>" (e.g. "map"), which prevents them from running the matching
+    // .cfg -- and mapmodel indices then resolve against the wrong model list.
+    void servermapnamepath(string &dst)
+    {
+        copystring(dst, servermappath);
+        char *dot = strrchr(dst, '.');
+        if(dot && !strcasecmp(dot, ".ogz")) *dot = '\0';
+        concatstring(dst, ".name");
+    }
+
+    // Fallback when no sidecar exists: derive a name from the path basename.
     void servermapbasename(string &dst)
     {
         const char *base = servermappath;
@@ -825,6 +837,37 @@ namespace server
         char *dot = strrchr(dst, '.');
         if(dot && !strcasecmp(dot, ".ogz")) *dot = '\0';
         if(!dst[0]) copystring(dst, "map");
+    }
+
+    // Read the persisted original map name; returns true and writes to dst on success.
+    bool readservermapname(string &dst)
+    {
+        string sidecar;
+        servermapnamepath(sidecar);
+        stream *f = openrawfile(sidecar, "rb");
+        if(!f) return false;
+        stream::offset len = f->size();
+        if(len <= 0 || len >= MAXSTRLEN) { delete f; return false; }
+        dst[0] = '\0';
+        size_t n = f->read(dst, min<size_t>((size_t)len, MAXSTRLEN-1));
+        delete f;
+        dst[n] = '\0';
+        // Strip trailing whitespace / newlines a previous run may have appended.
+        for(int i = (int)strlen(dst) - 1; i >= 0 && (dst[i] == '\n' || dst[i] == '\r' || dst[i] == ' '); i--) dst[i] = '\0';
+        return dst[0] != '\0';
+    }
+
+    bool writeservermapname(const char *name)
+    {
+        if(!name || !*name) return false;
+        string sidecar;
+        servermapnamepath(sidecar);
+        stream *f = openrawfile(sidecar, "wb");
+        if(!f) return false;
+        size_t n = strlen(name);
+        bool ok = (f->write(name, n) == n);
+        delete f;
+        return ok;
     }
 
     bool saveservermap()
@@ -845,6 +888,9 @@ namespace server
         }
         delete f;
         if(!ok) { const char *p = findfile(servermappath, "rb"); if(p) remove(p); }
+        // Stamp the canonical map name next to the .ogz so a future loadservermap() can announce
+        // the right name to clients (and they can resolve the matching .cfg).
+        if(ok && smapname[0]) writeservermapname(smapname);
         return ok;
     }
 
@@ -869,7 +915,9 @@ namespace server
         if(!ok) { delete tmp; return false; }
         if(mapdata) DELETEP(mapdata);
         mapdata = tmp;
-        servermapbasename(mapdataname);
+        // Prefer the sidecar (canonical map name); fall back to the .ogz basename for the
+        // legacy / first-run case where no sidecar was ever written.
+        if(!readservermapname(mapdataname)) servermapbasename(mapdataname);
         mapdatadirty = false;
         updatemapdatacrc();
         return true;
