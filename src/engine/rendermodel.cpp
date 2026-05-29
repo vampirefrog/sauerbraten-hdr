@@ -1167,3 +1167,214 @@ void setbbfrommodel(dynent *d, const char *mdl)
     }
 }
 
+
+// -----------------------------------------------------------------------------------------------
+// glTF mapmodel export -- called from engine/gltfexport.cpp's writegltf(). The exporter cannot
+// include animmodel.h / vertmodel.h / skelmodel.h itself (those declare file-scope VARs and
+// static class-member definitions, so they only compile in this TU), so we do the part/mesh walk
+// here and append the resulting nodes/meshes/primitives/accessors/bufferViews to the shared
+// `gltf g` value via the typed API in gltfexport.h.
+// -----------------------------------------------------------------------------------------------
+#include "gltfexport.h"
+
+void gltf_emit_mapmodel(gltf &g, stream *b, int &binsize, const extentity &ent, int rootnode)
+{
+    model *mm = loadmapmodel(ent.attr2);
+    if(!mm) return;
+    animmodel *am = (animmodel *)mm;
+
+    loopv(am->parts)
+    {
+        animmodel::part *p = am->parts[i];
+        if(!p || !p->meshes) continue;
+
+        gltf::node partnode;
+        partnode.mesh = g.meshes.length();
+        partnode.light = -1;
+        // ent.attr1 is yaw in degrees. The quaternion's z = sin(yaw/2), w = cos(yaw/2).
+        float yawrad = ent.attr1 * PI / 360.0f;
+        partnode.rotation = vec4(0, 0, sinf(yawrad), cosf(yawrad));
+        partnode.scale = vec(am->scale, am->scale, am->scale);
+        partnode.translation = ent.o;
+        copystring(partnode.name, mm->name ? mm->name : "mapmodel");
+
+        // Dedup mesh by meshgroup name across entities, since N entities pointing at the same
+        // mapmodel should share one mesh in the gltf rather than re-emit its geometry N times.
+        if(p->meshes->name)
+        {
+            int meshid = -1;
+            loopvj(g.meshes) if(!strcmp(g.meshes[j].name, p->meshes->name)) { meshid = j; break; }
+            if(meshid >= 0)
+            {
+                partnode.mesh = meshid;
+                g.nodes[rootnode].children.add(g.nodes.length());
+                g.nodes.add(partnode);
+                continue;
+            }
+        }
+
+        g.nodes[rootnode].children.add(g.nodes.length());
+        g.nodes.add(partnode);
+
+        gltf::mesh gmesh;
+        copystring(gmesh.name, p->meshes->name ? p->meshes->name : "mesh");
+
+        int mtype = am->type();
+        bool skel = (mtype == MDL_MD5 || mtype == MDL_IQM || mtype == MDL_SMD);
+
+        loopvj(p->meshes->meshes)
+        {
+            animmodel::mesh *mesh = p->meshes->meshes[j];
+            if(!mesh) continue;
+
+            Texture *tex = p->skins.inrange(j) && p->skins[j].tex ? p->skins[j].tex : notexture;
+            gltf::material mat;
+            mat.doubleSided = p->skins.inrange(j) ? !p->skins[j].cullface : false;
+            mat.alphaMode = gltf::material::MASK;
+            copystring(mat.name, tex && tex->name ? tex->name : "mapmodel_mat");
+
+            gltf::texture gtex;
+            gtex.sampler = 0;
+            gtex.source = g.getOrAddImage(gltf_resolvediskuri(tex && tex->name ? tex->name : "data/notexture.png"));
+            copystring(gtex.name, tex && tex->name ? tex->name : "notexture");
+            mat.pbrMetallicRoughness.baseColorTexture.index = g.getOrAddTexture(gtex);
+            mat.pbrMetallicRoughness.baseColorTexture.texCoord = 0;
+
+            gltf::primitive prim;
+            prim.material = g.getOrAddMaterial(mat);
+
+            if(skel)
+            {
+                skelmodel::skelmesh *sm = (skelmodel::skelmesh *)mesh;
+                if(sm->numverts <= 0 || sm->numtris <= 0 || !sm->verts || !sm->tris) continue;
+
+                int vsize = sm->numverts * (int)sizeof(skelmodel::vert);
+                b->write(sm->verts, vsize);
+
+                vec vmin(FLT_MAX, FLT_MAX, FLT_MAX), vmax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+                for(int l = 0; l < sm->numverts; l++)
+                {
+                    const vec &pp = sm->verts[l].pos;
+                    if(pp.x < vmin.x) vmin.x = pp.x;
+                    if(pp.y < vmin.y) vmin.y = pp.y;
+                    if(pp.z < vmin.z) vmin.z = pp.z;
+                    if(pp.x > vmax.x) vmax.x = pp.x;
+                    if(pp.y > vmax.y) vmax.y = pp.y;
+                    if(pp.z > vmax.z) vmax.z = pp.z;
+                }
+
+                gltf::accessor a; gltf::bufferView bv;
+                prim.attributes.position = g.accessors.length();
+                a.bufferView = g.bufferViews.length(); a.componentType = gltf::accessor::FLOAT;
+                a.type = gltf::accessor::VEC3; a.count = sm->numverts;
+                a.min = vmin; a.max = vmax; a.minmax = true; a.normalized = false;
+                g.accessors.add(a);
+                bv.buffer = 0; bv.byteStride = sizeof(skelmodel::vert);
+                bv.byteOffset = binsize + (int)offsetof(skelmodel::vert, pos);
+                bv.byteLength = vsize - (int)offsetof(skelmodel::vert, pos);
+                bv.target = gltf::bufferView::ARRAY_BUFFER;
+                g.bufferViews.add(bv);
+
+                prim.attributes.normal = g.accessors.length();
+                a.bufferView = g.bufferViews.length(); a.minmax = false;
+                g.accessors.add(a);
+                bv.byteOffset = binsize + (int)offsetof(skelmodel::vert, norm);
+                bv.byteLength = vsize - (int)offsetof(skelmodel::vert, norm);
+                g.bufferViews.add(bv);
+
+                prim.attributes.texcoord_0 = g.accessors.length();
+                a.bufferView = g.bufferViews.length(); a.type = gltf::accessor::VEC2;
+                g.accessors.add(a);
+                bv.byteOffset = binsize + (int)offsetof(skelmodel::vert, tc);
+                bv.byteLength = vsize - (int)offsetof(skelmodel::vert, tc);
+                g.bufferViews.add(bv);
+                binsize += vsize;
+
+                int esize = sm->numtris * (int)sizeof(skelmodel::tri);
+                b->write(sm->tris, esize);
+                prim.indices = g.accessors.length();
+                a.bufferView = g.bufferViews.length(); a.componentType = gltf::accessor::UNSIGNED_SHORT;
+                a.type = gltf::accessor::SCALAR; a.count = sm->numtris * 3;
+                g.accessors.add(a);
+                bv.byteStride = 0;
+                bv.byteOffset = binsize; bv.byteLength = esize;
+                bv.target = gltf::bufferView::ELEMENT_ARRAY_BUFFER;
+                g.bufferViews.add(bv);
+                binsize += esize;
+
+                int aligned = (binsize + 3) & ~3;
+                if(aligned > binsize) { char pad[4] = {0,0,0,0}; b->write(pad, aligned - binsize); binsize = aligned; }
+            }
+            else
+            {
+                vertmodel::vertmesh *vm = (vertmodel::vertmesh *)mesh;
+                if(vm->numverts <= 0 || vm->numtris <= 0 || !vm->verts || !vm->tcverts || !vm->tris) continue;
+
+                int vsize = vm->numverts * (int)sizeof(vertmodel::vert);
+                b->write(vm->verts, vsize);
+
+                vec vmin(FLT_MAX, FLT_MAX, FLT_MAX), vmax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+                for(int l = 0; l < vm->numverts; l++)
+                {
+                    const vec &pp = vm->verts[l].pos;
+                    if(pp.x < vmin.x) vmin.x = pp.x;
+                    if(pp.y < vmin.y) vmin.y = pp.y;
+                    if(pp.z < vmin.z) vmin.z = pp.z;
+                    if(pp.x > vmax.x) vmax.x = pp.x;
+                    if(pp.y > vmax.y) vmax.y = pp.y;
+                    if(pp.z > vmax.z) vmax.z = pp.z;
+                }
+
+                gltf::accessor a; gltf::bufferView bv;
+                prim.attributes.position = g.accessors.length();
+                a.bufferView = g.bufferViews.length(); a.componentType = gltf::accessor::FLOAT;
+                a.type = gltf::accessor::VEC3; a.count = vm->numverts;
+                a.min = vmin; a.max = vmax; a.minmax = true; a.normalized = false;
+                g.accessors.add(a);
+                bv.buffer = 0; bv.byteStride = sizeof(vertmodel::vert);
+                bv.byteOffset = binsize + (int)offsetof(vertmodel::vert, pos);
+                bv.byteLength = vsize - (int)offsetof(vertmodel::vert, pos);
+                bv.target = gltf::bufferView::ARRAY_BUFFER;
+                g.bufferViews.add(bv);
+
+                prim.attributes.normal = g.accessors.length();
+                a.bufferView = g.bufferViews.length(); a.minmax = false;
+                g.accessors.add(a);
+                bv.byteOffset = binsize + (int)offsetof(vertmodel::vert, norm);
+                bv.byteLength = vsize - (int)offsetof(vertmodel::vert, norm);
+                g.bufferViews.add(bv);
+                binsize += vsize;
+
+                int tsize = vm->numverts * (int)sizeof(vertmodel::tcvert);
+                b->write(vm->tcverts, tsize);
+                prim.attributes.texcoord_0 = g.accessors.length();
+                a.bufferView = g.bufferViews.length(); a.type = gltf::accessor::VEC2;
+                g.accessors.add(a);
+                bv.byteStride = sizeof(vertmodel::tcvert);
+                bv.byteOffset = binsize; bv.byteLength = tsize;
+                bv.target = gltf::bufferView::ARRAY_BUFFER;
+                g.bufferViews.add(bv);
+                binsize += tsize;
+
+                int esize = vm->numtris * (int)sizeof(vertmodel::tri);
+                b->write(vm->tris, esize);
+                prim.indices = g.accessors.length();
+                a.bufferView = g.bufferViews.length(); a.componentType = gltf::accessor::UNSIGNED_SHORT;
+                a.type = gltf::accessor::SCALAR; a.count = vm->numtris * 3;
+                g.accessors.add(a);
+                bv.byteStride = 0;
+                bv.byteOffset = binsize; bv.byteLength = esize;
+                bv.target = gltf::bufferView::ELEMENT_ARRAY_BUFFER;
+                g.bufferViews.add(bv);
+                binsize += esize;
+
+                int aligned = (binsize + 3) & ~3;
+                if(aligned > binsize) { char pad[4] = {0,0,0,0}; b->write(pad, aligned - binsize); binsize = aligned; }
+            }
+
+            gmesh.primitives.add(prim);
+        }
+
+        g.meshes.add(gmesh);
+    }
+}
