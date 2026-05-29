@@ -252,7 +252,11 @@ namespace game
         if((m->etype == PLATFORM || m->etype == ELEVATOR) && player1 && player1->state == CS_ALIVE)
         {
             vec delta = vec(pos).sub(m->o);
-            if(delta.z > 0 && platformcollide(player1, m, vec(0, 0, 1), 0.5f))
+            // Args mirror moveplatform's own passenger detection at physics.cpp:2008 --
+            // (platform, candidate-dynent, +Z, margin). A larger margin (1.5) is forgiving
+            // for cases where the player has just left the platform briefly (a small hop) so
+            // a rising platform doesn't leave them behind.
+            if(delta.z > 0 && platformcollide(m, player1, vec(0, 0, 1), 1.5f))
             {
                 player1->o.add(delta);
                 player1->newpos.add(delta);
