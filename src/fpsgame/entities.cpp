@@ -484,7 +484,10 @@ namespace entities
         }
     }
 
-    void unlocktriggers(int tag, int oldstate = TRIGGER_RESET, int newstate = TRIGGERING)
+    // Forward-declared so unlocktriggers / ICOMMAND(trigger) below can call it before its body.
+    void settriggerstate(int idx, int newstate, bool broadcast);
+
+    void unlocktriggers(int tag, int oldstate = TRIGGER_RESET, int newstate = TRIGGERING, bool broadcast = false)
     {
         loopv(ents)
         {
@@ -493,17 +496,19 @@ namespace entities
             if(e.attr4 == tag && e.triggerstate == oldstate && checktriggertype(e.attr3, TRIG_LOCKED))
             {
                 if(newstate == TRIGGER_RESETTING && checktriggertype(e.attr3, TRIG_COLLIDE) && overlapsdynent(e.o, 20)) continue;
-                e.triggerstate = newstate;
-                e.lasttrigger = lastmillis;
-                if(checktriggertype(e.attr3, TRIG_RUMBLE)) playsound(S_RUMBLE, &e.o);
+                settriggerstate(i, newstate, broadcast);
             }
         }
     }
 
     ICOMMAND(trigger, "ii", (int *tag, int *state),
     {
-        if(*state) unlocktriggers(*tag);
-        else unlocktriggers(*tag, TRIGGERED, TRIGGER_RESETTING);
+        // User-initiated (console / cubescript event handler) -- broadcast so peers learn about it.
+        // When recursively invoked from inside a `level_trigger_<tag>` script that's already
+        // running because settriggerstate broadcasted, each individual settriggerstate call below
+        // still broadcasts on its own, so peers see one N_TRIGGER per affected entity.
+        if(*state) unlocktriggers(*tag, TRIGGER_RESET, TRIGGERING, true);
+        else unlocktriggers(*tag, TRIGGERED, TRIGGER_RESETTING, true);
     });
 
     VAR(triggerstate, -1, 0, 1);
@@ -518,6 +523,57 @@ namespace entities
         }
     }
 
+    static void sendtriggerpacket(int idx, int newstate)
+    {
+        if(player1->clientnum < 0) return;   // standalone / pre-connect: no sync to do
+        packetbuf p(16, ENET_PACKET_FLAG_RELIABLE);
+        putint(p, N_TRIGGER);
+        putint(p, idx);
+        putint(p, newstate);
+        sendclientpacket(p.finalize(), 0);
+    }
+
+    // Single chokepoint for trigger state transitions. Pass broadcast=true when the local player
+    // drove the change (proximity entry/exit, the cubescript `trigger` command typed locally);
+    // broadcast=false for transitions the receiving peer is re-running (a 1000ms timer cascade
+    // that fires identically on every client, or a remote N_TRIGGER we just received).
+    //
+    // The cubescript level_trigger_<tag> hook only runs when broadcast=true, so peers don't
+    // re-execute scripts -- any state changes the script makes will reach them as their own
+    // N_TRIGGER messages. Audio (TRIG_RUMBLE) and the TRIG_ENDSP game-end signal run on every
+    // client so the door animation sounds + level-end behaviour are coherent.
+    void settriggerstate(int idx, int newstate, bool broadcast)
+    {
+        if(!ents.inrange(idx)) return;
+        fpsentity &e = *(fpsentity *)ents[idx];
+        if(e.type != ET_MAPMODEL || !validtrigger(e.attr3)) return;
+        if(e.triggerstate == newstate) return;
+
+        e.triggerstate = newstate;
+        e.lasttrigger = lastmillis;
+        setuptriggerflags(e);
+
+        bool entering = (newstate == TRIGGERING || newstate == TRIGGER_RESETTING);
+        if(entering && checktriggertype(e.attr3, TRIG_RUMBLE)) playsound(S_RUMBLE, &e.o);
+        if(newstate == TRIGGERING && checktriggertype(e.attr3, TRIG_ENDSP)) endsp(false);
+
+        if(broadcast && e.attr4)
+        {
+            if(newstate == TRIGGERING) doleveltrigger(e.attr4, 1);
+            else if(newstate == TRIGGER_RESETTING) doleveltrigger(e.attr4, 0);
+        }
+        if(broadcast) sendtriggerpacket(idx, newstate);
+    }
+
+    // Drives the trigger state machine off the LOCAL player's position only. Only the proximity-
+    // initiated transitions (RESET->TRIGGERING and TRIGGERED->TRIGGER_RESETTING) broadcast; the
+    // 1000ms-timer cascades fire identically on every client (each ticks off its own lasttrigger,
+    // which was set when the proximity broadcast arrived) so they converge without a packet.
+    //
+    // Limitation: in MP a door closes when the player who opened it walks away, even if a
+    // teammate is still under it. To support "stays open while ANY player is inside" we'd need to
+    // poll other players' positions, which Sauer broadcasts unreliably -- not worth the drift for
+    // Phase 1.
     void checktriggers()
     {
         if(player1->state != CS_ALIVE) return;
@@ -534,14 +590,18 @@ namespace entities
                     {
                         if(e.attr4)
                         {
-                            if(e.triggerstate == TRIGGERING) unlocktriggers(e.attr4);
-                            else unlocktriggers(e.attr4, TRIGGERED, TRIGGER_RESETTING);
+                            // Cascade unlock runs on every client off the same lasttrigger, so
+                            // broadcast=false: each peer's local checktriggers reaches the same
+                            // tag set identically.
+                            if(e.triggerstate == TRIGGERING) unlocktriggers(e.attr4, TRIGGER_RESET, TRIGGERING, false);
+                            else unlocktriggers(e.attr4, TRIGGERED, TRIGGER_RESETTING, false);
                         }
-                        if(checktriggertype(e.attr3, TRIG_DISAPPEAR)) e.triggerstate = TRIGGER_DISAPPEARED;
-                        else if(e.triggerstate==TRIGGERING && checktriggertype(e.attr3, TRIG_TOGGLE)) e.triggerstate = TRIGGERED;
-                        else e.triggerstate = TRIGGER_RESET;
+                        int next;
+                        if(checktriggertype(e.attr3, TRIG_DISAPPEAR)) next = TRIGGER_DISAPPEARED;
+                        else if(e.triggerstate==TRIGGERING && checktriggertype(e.attr3, TRIG_TOGGLE)) next = TRIGGERED;
+                        else next = TRIGGER_RESET;
+                        settriggerstate(i, next, false);   // timer-driven -- already deterministic
                     }
-                    setuptriggerflags(e);
                     break;
                 case TRIGGER_RESET:
                     if(e.lasttrigger)
@@ -554,16 +614,12 @@ namespace entities
                     else if(checktriggertype(e.attr3, TRIG_LOCKED))
                     {
                         if(!e.attr4) break;
+                        // "denied" hook; not a state change, stays local
                         doleveltrigger(e.attr4, -1);
                         e.lasttrigger = lastmillis;
                         break;
                     }
-                    e.triggerstate = TRIGGERING;
-                    e.lasttrigger = lastmillis;
-                    setuptriggerflags(e);
-                    if(checktriggertype(e.attr3, TRIG_RUMBLE)) playsound(S_RUMBLE, &e.o);
-                    if(checktriggertype(e.attr3, TRIG_ENDSP)) endsp(false);
-                    if(e.attr4) doleveltrigger(e.attr4, 1);
+                    settriggerstate(i, TRIGGERING, true);   // PROXIMITY: broadcast
                     break;
                 case TRIGGERED:
                     if(e.o.dist(o)-player1->radius<(checktriggertype(e.attr3, TRIG_COLLIDE) ? 20 : 12))
@@ -581,12 +637,7 @@ namespace entities
                     }
                     else break;
                     if(checktriggertype(e.attr3, TRIG_COLLIDE) && overlapsdynent(e.o, 20)) break;
-                    e.triggerstate = TRIGGER_RESETTING;
-                    e.lasttrigger = lastmillis;
-                    setuptriggerflags(e);
-                    if(checktriggertype(e.attr3, TRIG_RUMBLE)) playsound(S_RUMBLE, &e.o);
-                    if(checktriggertype(e.attr3, TRIG_ENDSP)) endsp(false);
-                    if(e.attr4) doleveltrigger(e.attr4, 0);
+                    settriggerstate(i, TRIGGER_RESETTING, true);   // PROXIMITY: broadcast
                     break;
             }
         }

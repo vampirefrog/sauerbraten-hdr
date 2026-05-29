@@ -770,11 +770,18 @@ namespace server
          sendf(-1, 1, "ris", N_SERVMSG, s);
     }
 
+    // Coop trigger state cache. triggerstates[entidx] holds the most-recent state we've heard
+    // any client report via N_TRIGGER. We never run the door state machine ourselves -- this is
+    // a pure relay-plus-replay so late joiners enter a coop game with the doors in the same
+    // state everyone else sees. Cleared on map change alongside items.
+    vector<int> triggerstates;
+
     void resetitems()
     {
         mcrc = 0;
         ments.setsize(0);
         sents.setsize(0);
+        triggerstates.setsize(0);
         //cps.reset();
     }
 
@@ -2056,6 +2063,14 @@ namespace server
             }
             putint(p, -1);
         }
+        // Replay cached door / trigger states so a coop joiner sees doors already-open / closing
+        // / disappeared, instead of starting fresh. Cached states from server.cpp::triggerstates.
+        loopv(triggerstates) if(triggerstates[i] != TRIGGER_RESET)
+        {
+            putint(p, N_TRIGGER);
+            putint(p, i);
+            putint(p, triggerstates[i]);
+        }
         bool hasmaster = false;
         if(mastermode != MM_OPEN)
         {
@@ -3309,6 +3324,19 @@ namespace server
                     flushclientposition(*cp);
                     sendf(-1, 0, "ri3x", N_JUMPPAD, pcn, jumppad, cp->ownernum);
                 }
+                break;
+            }
+
+            case N_TRIGGER:
+            {
+                // Coop trigger sync. We don't run the state machine here -- the server is just a
+                // relay + a persistent cache so late joiners get the current door states. We
+                // store every non-RESET state we see; sendwelcome() replays them to joiners.
+                int idx = getint(p), state = getint(p);
+                if(idx < 0 || idx >= MAXENTS) break;
+                while(triggerstates.length() <= idx) triggerstates.add(TRIGGER_RESET);
+                triggerstates[idx] = state;
+                sendf(-1, 0, "ri3x", N_TRIGGER, idx, state, sender);
                 break;
             }
                 

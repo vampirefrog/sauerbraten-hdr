@@ -1264,6 +1264,15 @@ namespace game
                 break;
             }
 
+            case N_TRIGGER:
+            {
+                // A peer (or the server's late-joiner replay) is telling us a trigger entity
+                // changed state. Apply locally with broadcast=false so we don't echo it back.
+                int idx = getint(p), state = getint(p);
+                entities::settriggerstate(idx, state, false);
+                break;
+            }
+
             default:
                 neterr("type");
                 return;

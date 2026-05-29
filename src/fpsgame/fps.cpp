@@ -273,9 +273,11 @@ namespace game
                 if(m_sp)
                 {
                     if(slowmosp) checkslowmo();
-                    if(m_classicsp) entities::checktriggers();
                 }
                 else if(cmode) cmode->checkitems(player1);
+                // Trigger state machine runs in all modes -- in MP it's the proximity check that
+                // drives the N_TRIGGER broadcasts. Was previously gated on m_classicsp.
+                entities::checktriggers();
             }
         }
         if(player1->clientnum>=0) c2sinfo();   // do this last, to reduce the effective frame lag
