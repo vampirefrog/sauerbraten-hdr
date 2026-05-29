@@ -238,10 +238,12 @@ namespace game
         updatedynentcache(m);
     }
 
-    // Authority broadcasts pos+vel for every moving movable so peers see the same physics. We
-    // skip stationary movables (vel.iszero() && nothing pending) to keep bandwidth low. Runs
-    // at 20Hz -- non-authority clients extrapolate from the last snap to fill the gap, so 50ms
-    // of error is roughly one frame of imperceptible drift even on barrels in free-fall.
+    // Authority broadcasts pos+vel for every CS_ALIVE movable -- including stationary ones --
+    // so peers can correct local-physics divergence at any time. We do NOT skip stationary
+    // movables: if a barrel just landed on a platform on the authority side, dropping its
+    // broadcast would leave a non-authority client whose local sim happened to tunnel through
+    // the platform falling forever with no snap to bring it back. Bandwidth cost is bounded
+    // (~ N movables * 20Hz * 30 bytes; a few KB/s for typical maps).
     static int lastmovablestatesend = 0;
     void broadcastmovablestates()
     {
@@ -249,14 +251,7 @@ namespace game
         if(!ismovableauthority()) return;
         if(lastmillis - lastmovablestatesend < 50) return;
         vector<int> moving;
-        loopv(movables)
-        {
-            movable *m = movables[i];
-            if(m->state != CS_ALIVE) continue;
-            // Always include moving things; also include things that maymove (gravity etc.).
-            if(m->vel.iszero() && !m->maymove() && !m->exploding) continue;
-            moving.add(i);
-        }
+        loopv(movables) if(movables[i]->state == CS_ALIVE) moving.add(i);
         lastmovablestatesend = lastmillis;
         if(moving.empty()) return;
 
