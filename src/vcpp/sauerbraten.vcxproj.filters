@@ -142,6 +142,12 @@
     <ClCompile Include="..\engine\worldio.cpp">
       <Filter>engine</Filter>
     </ClCompile>
+    <ClCompile Include="..\engine\bezpatch.cpp">
+      <Filter>engine</Filter>
+    </ClCompile>
+    <ClCompile Include="..\engine\gltfexport.cpp">
+      <Filter>engine</Filter>
+    </ClCompile>
     <ClCompile Include="..\fpsgame\ai.cpp">
       <Filter>fpsgame</Filter>
     </ClCompile>
@@ -217,6 +223,12 @@
       <Filter>engine</Filter>
     </ClInclude>
     <ClInclude Include="..\engine\engine.h">
+      <Filter>engine</Filter>
+    </ClInclude>
+    <ClInclude Include="..\engine\bezpatch.h">
+      <Filter>engine</Filter>
+    </ClInclude>
+    <ClInclude Include="..\engine\gltfexport.h">
       <Filter>engine</Filter>
     </ClInclude>
     <ClInclude Include="..\engine\explosion.h">
