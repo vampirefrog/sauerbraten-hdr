@@ -2,6 +2,10 @@
 #include "game.h"
 
 extern int physsteps;
+// engine helper from physics.cpp:1959; same "is d standing on o" test that moveplatform uses
+// for its passenger detection. We reuse it on the receive side so a rising platform on a
+// non-authority client carries the local player up (without this, the player falls through).
+extern bool platformcollide(physent *d, physent *o, const vec &dir, float margin);
 
 namespace game
 {
@@ -230,14 +234,31 @@ namespace game
     // eyeheight to d->o because it expects a feet-position input (see physics.cpp). The
     // authority broadcasts m->o which is already in the dynent's center / eye frame, so a
     // second entinmap raises the receiver's movable by one eyeheight above the authority's.
-    // For tall models (platforms, barrels) that puts them noticeably above where they should
-    // be, which then makes their local "collide with level geometry" tests fire at the wrong
-    // times -- the symptom we were seeing as platform shake.
+    //
+    // Carry-passengers: when a platform's snap moves it UP, our local player needs to be
+    // pushed up with it -- otherwise the platform rises through the player and they fall
+    // through. moveplatform() does this on the authority via the engine's passenger logic;
+    // we use the same platformcollide() test to detect "is player1 standing on this
+    // platform?" and translate them by the snap delta. Going down doesn't need this:
+    // gravity carries the player down with the descending platform naturally. Other
+    // players (clients[]) handle their own carry-up on their own clients, so we only
+    // touch player1 here.
     void applyremotemovablestate(int idx, const vec &pos, const vec &vel)
     {
         if(!movables.inrange(idx)) return;
         movable *m = movables[idx];
         if(m->state != CS_ALIVE) return;
+
+        if((m->etype == PLATFORM || m->etype == ELEVATOR) && player1 && player1->state == CS_ALIVE)
+        {
+            vec delta = vec(pos).sub(m->o);
+            if(delta.z > 0 && platformcollide(player1, m, vec(0, 0, 1), 0.5f))
+            {
+                player1->o.add(delta);
+                player1->newpos.add(delta);
+            }
+        }
+
         m->o = pos;
         m->vel = vel;
         updatedynentcache(m);
