@@ -886,6 +886,17 @@ namespace server
         return ok;
     }
 
+    // Remove the persisted .ogz from disk. Called when the server's mapdata gets dropped (i.e.
+    // a `/map X` to a name different from what the .ogz is for); the bytes on disk are no
+    // longer authoritative for the announced map and we don't want to push them back to
+    // clients or restore them on the next restart.
+    void deleteservermap()
+    {
+        if(!servermappath[0]) return;
+        const char *p = findfile(servermappath, "rb");
+        if(p) remove(p);
+    }
+
     bool saveservermap()
     {
         if(!mapdata || !servermappath[0]) return false;
@@ -998,13 +1009,27 @@ namespace server
     void loadstartupmap()
     {
         if(!persistmaps) return;
-        if(!serverloadmap()) return;     // disk -> live octree
-        loadservermap();                 // disk -> mapdata send-buffer + crc
-        copystring(pendingmap, mapdataname);
+        // Try the .name sidecar first -- it's the authoritative "last requested map", written
+        // even when the server doesn't own the octree (e.g. just /map switches between vanilla
+        // maps that the clients load themselves).
+        string lastname;
+        bool havename = readservermapname(lastname);
+        bool haveogz = serverloadmap();      // octree -> live (only if server has the .ogz)
+        if(haveogz)
+        {
+            loadservermap();                 // .ogz bytes -> mapdata send-buffer + crc
+            copystring(pendingmap, mapdataname);
+        }
+        else if(havename)
+        {
+            copystring(pendingmap, lastname);
+        }
+        else return;                          // nothing persisted at all
         pendingmode = 1; // coop edit
         havependingmap = true;
         mapdatadirty = false;
-        logoutf("restored server map from \"%s\" as \"%s\"", servermappath, mapdataname);
+        if(haveogz) logoutf("restored server map from \"%s\" as \"%s\"", servermappath, mapdataname);
+        else        logoutf("no .ogz on disk; restoring last map name only: \"%s\"", pendingmap);
     }
 
     void shutdownsave()
@@ -2329,6 +2354,14 @@ namespace server
             mapdataname[0] = '\0';
             mapdatadirty = false;
             serverhasmap = false;
+            // Persist the new "last requested map" name and drop the now-stale .ogz from
+            // disk -- otherwise loadstartupmap on the next restart would restore the OLD map
+            // and ignore the /map change we're handling now.
+            if(persistmaps && s && *s)
+            {
+                writeservermapname(s);
+                deleteservermap();
+            }
         }
         copystring(smapname, s);
         loaditems();
