@@ -223,7 +223,7 @@ enum
     N_DIED, N_DAMAGE, N_HITPUSH, N_SHOTFX, N_EXPLODEFX,
     N_TRYSPAWN, N_SPAWNSTATE, N_SPAWN, N_FORCEDEATH,
     N_GUNSELECT, N_TAUNT,
-    N_MAPCHANGE, N_MAPVOTE, N_TEAMINFO, N_ITEMSPAWN, N_ITEMPICKUP, N_ITEMACC, N_TELEPORT, N_JUMPPAD, N_TRIGGER,
+    N_MAPCHANGE, N_MAPVOTE, N_TEAMINFO, N_ITEMSPAWN, N_ITEMPICKUP, N_ITEMACC, N_TELEPORT, N_JUMPPAD, N_TRIGGER, N_PLATFORM, N_PLATFORMSTATE,
     N_PING, N_PONG, N_CLIENTPING,
     N_TIMEUP, N_FORCEINTERMISSION,
     N_SERVMSG, N_ITEMLIST, N_RESUME,
@@ -255,6 +255,7 @@ static const int msgsizes[] =               // size inclusive message token, 0 f
     N_GUNSELECT, 2, N_TAUNT, 1,
     N_MAPCHANGE, 0, N_MAPVOTE, 0, N_TEAMINFO, 0, N_ITEMSPAWN, 2, N_ITEMPICKUP, 2, N_ITEMACC, 3,
     N_TRIGGER, 3,
+    N_PLATFORM, 3, N_PLATFORMSTATE, 6,
     N_PING, 2, N_PONG, 2, N_CLIENTPING, 2,
     N_TIMEUP, 2, N_FORCEINTERMISSION, 1,
     N_SERVMSG, 0, N_ITEMLIST, 0, N_RESUME, 0,
@@ -281,7 +282,7 @@ static const int msgsizes[] =               // size inclusive message token, 0 f
 #define SAUERBRATEN_SERVER_PORT 28785
 #define SAUERBRATEN_SERVINFO_PORT 28786
 #define SAUERBRATEN_MASTER_PORT 28787
-#define PROTOCOL_VERSION 261            // bump when protocol changes (261 added N_TRIGGER for coop trigger sync)
+#define PROTOCOL_VERSION 262            // bump when protocol changes (262 added N_PLATFORM + N_PLATFORMSTATE for coop platforms)
 #define DEMO_VERSION 1                  // bump when demo format changes
 #define DEMO_MAGIC "SAUERBRATEN_DEMO"
 
@@ -792,6 +793,9 @@ namespace game
     extern void rendermovables();
     extern void suicidemovable(movable *m);
     extern void hitmovable(int damage, movable *m, fpsent *at, const vec &vel, int gun);
+    extern void triggerplatform(int tag, int newdir, bool broadcast);
+    extern void applyremoteplatformstate(int idx, const vec &pos, int dir);
+    extern void broadcastplatformstates();
 
     // weapon
     extern int getweapon(const char *name);

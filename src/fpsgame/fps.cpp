@@ -252,6 +252,9 @@ namespace game
         moveragdolls();
         gets2c();
         updatemovables(curtime);
+        // ~1Hz broadcast of moving platform positions so the server can replay them in the
+        // welcome packet (late joiners then spawn in-flight platforms at the right spot).
+        broadcastplatformstates();
         updatemonsters(curtime);
         if(connected)
         {

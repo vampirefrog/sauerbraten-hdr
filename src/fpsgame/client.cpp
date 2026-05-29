@@ -1692,6 +1692,28 @@ namespace game
                 break;
             }
 
+            case N_PLATFORM:
+            {
+                // Direction change from a peer's `platform` cubescript invocation, or from the
+                // server's welcome-packet replay. Apply locally without re-broadcasting.
+                int tag = getint(p), dir = getint(p);
+                triggerplatform(tag, dir, false);
+                break;
+            }
+
+            case N_PLATFORMSTATE:
+            {
+                // Periodic position broadcast (or welcome-replay) for a moving platform. We
+                // snap our local platform to the reported position so a late joiner picks up
+                // an in-flight platform at the right spot instead of starting from map-default.
+                int idx = getint(p);
+                vec pos;
+                loopk(3) pos[k] = getint(p)/DMF;
+                int dir = getint(p);
+                applyremoteplatformstate(idx, pos, dir);
+                break;
+            }
+
             case N_CLIPBOARD:
             {
                 int cn = getint(p), unpacklen = getint(p), packlen = getint(p);

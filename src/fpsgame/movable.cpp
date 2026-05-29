@@ -87,8 +87,11 @@ namespace game
             cleardynentcache();
             movables.deletecontents();
         }
-        if(!m_dmsp && !m_classicsp) return;
-        loopv(entities::ents) 
+        // Used to be gated to m_dmsp || m_classicsp. We now instantiate in every mode so coop
+        // can sync platforms / elevators / barrels via N_PLATFORM / N_HITMOVABLE -- positions
+        // are still computed locally per-client (deterministic linear motion until something
+        // hits a wall or a tag-driven stop) so no per-tick sync traffic is needed.
+        loopv(entities::ents)
         {
             const entity &e = *entities::ents[i];
             if(e.type!=BOX && e.type!=BARREL && e.type!=PLATFORM && e.type!=ELEVATOR) continue;
@@ -100,7 +103,11 @@ namespace game
         }
     }
 
-    void triggerplatform(int tag, int newdir)
+    // Apply a platform direction change. broadcast=true when initiated locally (the cubescript
+    // `platform` command, typed by a user or run from a trigger script that's already broadcast
+    // its own N_TRIGGER); broadcast=false for the receive side and for the server's late-joiner
+    // replay so we don't echo.
+    void triggerplatform(int tag, int newdir, bool broadcast)
     {
         newdir = max(-1, min(1, newdir));
         loopv(movables)
@@ -118,13 +125,102 @@ namespace game
                 else m->vel = vec(0, 0, newdir*m->dir*m->maxspeed);
             }
         }
+        if(broadcast && player1->clientnum >= 0)
+        {
+            packetbuf p(16, ENET_PACKET_FLAG_RELIABLE);
+            putint(p, N_PLATFORM);
+            putint(p, tag);
+            putint(p, newdir);
+            sendclientpacket(p.finalize(), 1);
+        }
     }
-    ICOMMAND(platform, "ii", (int *tag, int *newdir), triggerplatform(*tag, *newdir));
+    ICOMMAND(platform, "ii", (int *tag, int *newdir), triggerplatform(*tag, *newdir, true));
 
     void stackmovable(movable *d, physent *o)
     {
         d->stacked = o;
         d->stackpos = o->o;
+    }
+
+    // Late joiners create their movables at the map default positions (clearmovables); the
+    // server replays the last cached N_PLATFORMSTATE for each moving platform in its welcome
+    // packet so the joiner spawns in-flight platforms at their current location, with the
+    // current direction, so physics continues from there.
+    void applyremoteplatformstate(int idx, const vec &pos, int dir)
+    {
+        if(!movables.inrange(idx)) return;
+        movable *m = movables[idx];
+        if(m->state != CS_ALIVE || (m->etype != PLATFORM && m->etype != ELEVATOR)) return;
+        m->o = pos;
+        entinmap(m);
+        updatedynentcache(m);
+        // Re-derive velocity from direction the way the constructor does, so the local sim
+        // resumes the same trajectory rather than picking up some quantised remnant.
+        int d2 = clamp(dir, -1, 1);
+        if(!d2) m->vel = vec(0, 0, 0);
+        else if(m->etype == PLATFORM) { vecfromyawpitch(m->yaw, 0, 1, 0, m->vel); m->vel.mul(d2 * m->dir * m->maxspeed); }
+        else m->vel = vec(0, 0, d2 * m->dir * m->maxspeed);
+    }
+
+    // Returns true if we're the lowest-clientnum client among the currently-connected players,
+    // and therefore the elected platform-state authority. Deterministic + leaderless: if the
+    // current authority leaves, the next lowest-clientnum client takes over automatically.
+    static bool isplatformstateauthority()
+    {
+        if(player1->clientnum < 0) return false;
+        loopv(clients)
+        {
+            fpsent *d = clients[i];
+            if(!d || d == player1) continue;
+            if(d->clientnum >= 0 && d->clientnum < player1->clientnum) return false;
+        }
+        return true;
+    }
+
+    // Periodic broadcast so the server's cache stays current and a fresh joiner gets recent
+    // positions in their welcome packet. Cheap (a few ints per moving platform, once a second)
+    // and only fires when there's actually a platform in motion to report. Per-message format
+    // mirrors the welcome replay so the server can store and forward without parsing.
+    static int lastplatformstatesend = 0;
+    void broadcastplatformstates()
+    {
+        if(player1->clientnum < 0) return;          // not connected
+        if(!isplatformstateauthority()) return;     // only the elected sender broadcasts
+        if(lastmillis - lastplatformstatesend < 1000) return;
+        // First collect the moving platforms; only construct + send a packet if there are any.
+        vector<int> moving;
+        loopv(movables)
+        {
+            movable *m = movables[i];
+            if(m->state != CS_ALIVE) continue;
+            if(m->etype != PLATFORM && m->etype != ELEVATOR) continue;
+            if(m->vel.iszero()) continue;
+            moving.add(i);
+        }
+        lastplatformstatesend = lastmillis;
+        if(moving.empty()) return;
+
+        packetbuf p(8 + moving.length()*32, ENET_PACKET_FLAG_RELIABLE);
+        loopv(moving)
+        {
+            int idx = moving[i];
+            movable *m = movables[idx];
+            putint(p, N_PLATFORMSTATE);
+            putint(p, idx);
+            ivec ipos(vec(m->o).mul(DMF));
+            putint(p, ipos.x);
+            putint(p, ipos.y);
+            putint(p, ipos.z);
+            int signdir;
+            if(m->etype == PLATFORM)
+            {
+                vec axis; vecfromyawpitch(m->yaw, 0, 1, 0, axis);
+                signdir = axis.dot(m->vel) >= 0 ? +1 : -1;
+            }
+            else signdir = m->vel.z >= 0 ? +1 : -1;
+            putint(p, signdir);
+        }
+        sendclientpacket(p.finalize(), 1);
     }
 
     void updatemovables(int curtime)

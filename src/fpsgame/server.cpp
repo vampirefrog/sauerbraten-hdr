@@ -776,12 +776,22 @@ namespace server
     // state everyone else sees. Cleared on map change alongside items.
     vector<int> triggerstates;
 
+    // Coop platform / movable state cache. Same idea as triggerstates: we don't run physics,
+    // we just record the latest direction change (N_PLATFORM by tag) and the latest periodic
+    // position broadcast (N_PLATFORMSTATE by movable index), and replay both in the welcome
+    // packet so a late joiner sees in-flight platforms at the right place + heading.
+    hashtable<int, int> platformdirs;       // tag -> last broadcast direction (+1/-1/0)
+    struct platformcache { ivec ipos; int dir; };
+    hashtable<int, platformcache> platformstates;  // movable index -> last (ipos, dir)
+
     void resetitems()
     {
         mcrc = 0;
         ments.setsize(0);
         sents.setsize(0);
         triggerstates.setsize(0);
+        platformdirs.clear();
+        platformstates.clear();
         //cps.reset();
     }
 
@@ -2119,6 +2129,27 @@ namespace server
             putint(p, i);
             putint(p, triggerstates[i]);
         }
+        // Replay cached platform direction overrides (tag -> dir): puts a joiner's platforms in
+        // the same heading peers already see, so the next moveplatform tick continues from the
+        // right vector instead of the map-default direction.
+        enumeratekt(platformdirs, int, tag, int, dir,
+        {
+            putint(p, N_PLATFORM);
+            putint(p, tag);
+            putint(p, dir);
+        });
+        // Replay the latest periodic positions broadcast by an existing client. Without this
+        // the joiner would create platforms at the map-default positions and instantly snap to
+        // them, missing whatever motion happened before they connected.
+        enumeratekt(platformstates, int, idx, platformcache, pc,
+        {
+            putint(p, N_PLATFORMSTATE);
+            putint(p, idx);
+            putint(p, pc.ipos.x);
+            putint(p, pc.ipos.y);
+            putint(p, pc.ipos.z);
+            putint(p, pc.dir);
+        });
         bool hasmaster = false;
         if(mastermode != MM_OPEN)
         {
@@ -3387,6 +3418,35 @@ namespace server
                 while(triggerstates.length() <= idx) triggerstates.add(TRIGGER_RESET);
                 triggerstates[idx] = state;
                 sendf(-1, 1, "ri3x", N_TRIGGER, idx, state, sender);
+                break;
+            }
+
+            case N_PLATFORM:
+            {
+                // Cubescript-driven direction change. Relay to every other client and cache by
+                // tag so the welcome replay can wake a joining player's platform into the right
+                // heading. We don't track *which* sender claimed which direction -- last writer
+                // wins, identical to the live behaviour on every client.
+                int tag = getint(p), dir = getint(p);
+                platformdirs[tag] = dir;
+                sendf(-1, 1, "ri3x", N_PLATFORM, tag, dir, sender);
+                break;
+            }
+
+            case N_PLATFORMSTATE:
+            {
+                // ~1Hz position broadcast from a client whose local platform is in motion.
+                // Pure cache (no live relay): other clients already have their own correct
+                // positions; only a late joiner needs this snapshot, replayed in the welcome.
+                int idx = getint(p);
+                ivec ipos;
+                ipos.x = getint(p);
+                ipos.y = getint(p);
+                ipos.z = getint(p);
+                int dir = getint(p);
+                if(idx < 0) break;
+                platformcache pc; pc.ipos = ipos; pc.dir = dir;
+                platformstates[idx] = pc;
                 break;
             }
                 
