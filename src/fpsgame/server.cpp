@@ -776,13 +776,18 @@ namespace server
     // state everyone else sees. Cleared on map change alongside items.
     vector<int> triggerstates;
 
-    // Coop platform / movable state cache. Same idea as triggerstates: we don't run physics,
-    // we just record the latest direction change (N_PLATFORM by tag) and the latest periodic
-    // position broadcast (N_PLATFORMSTATE by movable index), and replay both in the welcome
-    // packet so a late joiner sees in-flight platforms at the right place + heading.
-    hashtable<int, int> platformdirs;       // tag -> last broadcast direction (+1/-1/0)
-    struct platformcache { ivec ipos; int dir; };
-    hashtable<int, platformcache> platformstates;  // movable index -> last (ipos, dir)
+    // Coop platform / movable state cache. We don't run physics, we record:
+    //   * the latest direction change (N_PLATFORM by tag), for welcome replay so a joiner gets
+    //     the right heading on triggered platforms;
+    //   * the latest 5Hz state snapshot (N_MOVABLESTATE by movable index, pos+vel) -- this is
+    //     also live-relayed to peers so everyone snaps to the authority's view, and replayed
+    //     on welcome so late joiners spawn movables already mid-flight;
+    //   * the set of exploded barrels (N_MOVABLEEXPLODE by movable index), replayed on welcome
+    //     so a joiner doesn't see destroyed barrels back alive.
+    hashtable<int, int> platformdirs;
+    struct movablecache { ivec ipos, ivel; };
+    hashtable<int, movablecache> movablestates;
+    vector<int> explodedmovables;
 
     void resetitems()
     {
@@ -791,7 +796,8 @@ namespace server
         sents.setsize(0);
         triggerstates.setsize(0);
         platformdirs.clear();
-        platformstates.clear();
+        movablestates.clear();
+        explodedmovables.setsize(0);
         //cps.reset();
     }
 
@@ -2138,18 +2144,26 @@ namespace server
             putint(p, tag);
             putint(p, dir);
         });
-        // Replay the latest periodic positions broadcast by an existing client. Without this
-        // the joiner would create platforms at the map-default positions and instantly snap to
-        // them, missing whatever motion happened before they connected.
-        enumeratekt(platformstates, int, idx, platformcache, pc,
+        // Replay the latest 5Hz movable snapshots. Without this the joiner would create
+        // movables at the map-default positions and have to wait up to 200ms for the
+        // authority's next broadcast to correct them.
+        enumeratekt(movablestates, int, idx, movablecache, pc,
         {
-            putint(p, N_PLATFORMSTATE);
+            putint(p, N_MOVABLESTATE);
             putint(p, idx);
             putint(p, pc.ipos.x);
             putint(p, pc.ipos.y);
             putint(p, pc.ipos.z);
-            putint(p, pc.dir);
+            putint(p, pc.ivel.x);
+            putint(p, pc.ivel.y);
+            putint(p, pc.ivel.z);
         });
+        // Mark already-exploded barrels as dead so the joiner doesn't see them respawned.
+        loopv(explodedmovables)
+        {
+            putint(p, N_MOVABLEEXPLODE);
+            putint(p, explodedmovables[i]);
+        }
         bool hasmaster = false;
         if(mastermode != MM_OPEN)
         {
@@ -3423,30 +3437,39 @@ namespace server
 
             case N_PLATFORM:
             {
-                // Cubescript-driven direction change. Relay to every other client and cache by
-                // tag so the welcome replay can wake a joining player's platform into the right
-                // heading. We don't track *which* sender claimed which direction -- last writer
-                // wins, identical to the live behaviour on every client.
+                // Cubescript-driven direction change. Relay + cache.
                 int tag = getint(p), dir = getint(p);
                 platformdirs[tag] = dir;
                 sendf(-1, 1, "ri3x", N_PLATFORM, tag, dir, sender);
                 break;
             }
 
-            case N_PLATFORMSTATE:
+            case N_MOVABLESTATE:
             {
-                // ~1Hz position broadcast from a client whose local platform is in motion.
-                // Pure cache (no live relay): other clients already have their own correct
-                // positions; only a late joiner needs this snapshot, replayed in the welcome.
+                // 5Hz authority snapshot for every moving movable. We both cache (welcome
+                // replay for late joiners) AND live-relay to all other clients so the
+                // authority's view is what everyone renders.
                 int idx = getint(p);
-                ivec ipos;
-                ipos.x = getint(p);
-                ipos.y = getint(p);
-                ipos.z = getint(p);
-                int dir = getint(p);
+                ivec ipos; ipos.x = getint(p); ipos.y = getint(p); ipos.z = getint(p);
+                ivec ivel; ivel.x = getint(p); ivel.y = getint(p); ivel.z = getint(p);
                 if(idx < 0) break;
-                platformcache pc; pc.ipos = ipos; pc.dir = dir;
-                platformstates[idx] = pc;
+                movablecache pc; pc.ipos = ipos; pc.ivel = ivel;
+                movablestates[idx] = pc;
+                sendf(-1, 1, "ri8x", N_MOVABLESTATE, idx, ipos.x, ipos.y, ipos.z, ivel.x, ivel.y, ivel.z, sender);
+                break;
+            }
+
+            case N_MOVABLEEXPLODE:
+            {
+                // Authority decided this barrel exploded. Relay + remember so late joiners
+                // don't see destroyed barrels resurrected.
+                int idx = getint(p);
+                if(idx < 0) break;
+                if(explodedmovables.find(idx) < 0) explodedmovables.add(idx);
+                // Drop any cached movement state -- once a barrel is dead there's nothing to
+                // replay for it.
+                movablestates.remove(idx);
+                sendf(-1, 1, "ri2x", N_MOVABLEEXPLODE, idx, sender);
                 break;
             }
                 

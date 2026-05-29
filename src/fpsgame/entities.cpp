@@ -749,6 +749,12 @@ namespace entities
             setuptriggerflags(f);
         }
         else cleartriggerflags(e);
+        // Spawn / respawn the movable dynent for this entity (barrels, boxes, platforms,
+        // elevators). Without this, newly-added movables stay invisible / non-physical until
+        // the next map load. Moving an existing movable in edit mode also goes through here
+        // and effectively respawns it -- same behaviour as health items, which lets coop
+        // editors refill a destroyed barrel by dragging it around.
+        respawnmovable(i);
         if(local) addmsg(N_EDITENT, "rii3ii5", i, (int)(e.o.x*DMF), (int)(e.o.y*DMF), (int)(e.o.z*DMF), e.type, e.attr1, e.attr2, e.attr3, e.attr4, e.attr5);
     }
 

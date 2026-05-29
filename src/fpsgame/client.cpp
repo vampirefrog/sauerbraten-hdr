@@ -1701,16 +1701,24 @@ namespace game
                 break;
             }
 
-            case N_PLATFORMSTATE:
+            case N_MOVABLESTATE:
             {
-                // Periodic position broadcast (or welcome-replay) for a moving platform. We
-                // snap our local platform to the reported position so a late joiner picks up
-                // an in-flight platform at the right spot instead of starting from map-default.
+                // 5Hz authority broadcast: snap our local movable to the authority's pos+vel.
+                // Same handler covers the live relay AND the welcome replay for late joiners.
                 int idx = getint(p);
                 vec pos;
                 loopk(3) pos[k] = getint(p)/DMF;
-                int dir = getint(p);
-                applyremoteplatformstate(idx, pos, dir);
+                vec vel;
+                loopk(3) vel[k] = getint(p)/DNF;
+                applyremotemovablestate(idx, pos, vel);
+                break;
+            }
+
+            case N_MOVABLEEXPLODE:
+            {
+                // Authority decided a barrel exploded. Run the local visual + mark dead.
+                int idx = getint(p);
+                applyremotemovableexplode(idx);
                 break;
             }
 
