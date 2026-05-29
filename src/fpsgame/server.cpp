@@ -3461,13 +3461,15 @@ namespace server
 
             case N_MOVABLEEXPLODE:
             {
-                // Authority decided this barrel exploded. Relay + remember so late joiners
-                // don't see destroyed barrels resurrected.
+                // Authority (the shooter, or whoever caused the suicide) is telling us this
+                // barrel exploded. With per-event authority a single barrel can briefly have
+                // two clients broadcast (e.g. two players both fall on the same barrel at the
+                // same instant); drop redundant relays so peers only see one explosion.
                 int idx = getint(p);
                 if(idx < 0) break;
-                if(explodedmovables.find(idx) < 0) explodedmovables.add(idx);
-                // Drop any cached movement state -- once a barrel is dead there's nothing to
-                // replay for it.
+                if(explodedmovables.find(idx) >= 0) break;
+                explodedmovables.add(idx);
+                // Drop any cached movement state -- nothing meaningful to replay for a dead barrel.
                 movablestates.remove(idx);
                 sendf(-1, 1, "ri2x", N_MOVABLEEXPLODE, idx, sender);
                 break;

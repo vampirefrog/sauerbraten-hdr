@@ -355,20 +355,43 @@ namespace game
         }
     }
     
-    // Authority owns barrel/box state. Non-authority just renders + applies authority's snaps.
-    // Suppressing the local mutation here keeps the simulation consistent: only one client
-    // decides "this barrel died" and broadcasts N_MOVABLEEXPLODE; everyone else picks it up.
+    // Per-event ownership: whoever caused the event is the authority. Local detection drives;
+    // duplicate explosion broadcasts get deduped server-side via explodedmovables.
     void suicidemovable(movable *m)
     {
-        if(!ismovableauthority()) return;
+        // No gate: whichever client's local physics detected the player-fell-on-barrel
+        // (typically the falling player's client) owns the event and broadcasts the explosion.
+        // If two clients somehow both detect it, server dedup handles it.
         m->suicide();
     }
 
+    // The SHOOTER is the authority for damage they cause: it's their shot, they see the
+    // barrel react with zero lag, and the resulting explosion is broadcast as N_MOVABLEEXPLODE
+    // from their client. Peers' shot replication still runs hit detection locally, but their
+    // hitmovable returns early -- they wait for the authoritative explode broadcast + the
+    // next N_MOVABLESTATE snap to catch up on the barrel's pushed velocity.
     void hitmovable(int damage, movable *m, fpsent *at, const vec &vel, int gun)
     {
-        if(!ismovableauthority()) return;
+        if(at != player1) return;         // not our shot -> not our problem
         m->hitpush(damage, vel, at, gun);
         m->damaged(damage, at, gun);
+        // Push the post-hit state immediately so peers see the barrel react rather than
+        // waiting up to 200ms for the position authority's next 5Hz refresh.
+        if(m->state == CS_ALIVE && player1->clientnum >= 0)
+        {
+            int idx = movables.find(m);
+            if(idx >= 0)
+            {
+                packetbuf p(32, ENET_PACKET_FLAG_RELIABLE);
+                putint(p, N_MOVABLESTATE);
+                putint(p, idx);
+                ivec ipos(vec(m->o).mul(DMF));
+                putint(p, ipos.x); putint(p, ipos.y); putint(p, ipos.z);
+                ivec ivel(vec(m->vel).mul(DNF));
+                putint(p, ivel.x); putint(p, ivel.y); putint(p, ivel.z);
+                sendclientpacket(p.finalize(), 1);
+            }
+        }
     }
 }
 
