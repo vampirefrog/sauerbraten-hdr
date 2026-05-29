@@ -1263,15 +1263,8 @@ namespace game
                 entities::jumppadeffects(d, jp, false);
                 break;
             }
-
-            case N_TRIGGER:
-            {
-                // A peer (or the server's late-joiner replay) is telling us a trigger entity
-                // changed state. Apply locally with broadcast=false so we don't echo it back.
-                int idx = getint(p), state = getint(p);
-                entities::settriggerstate(idx, state, false);
-                break;
-            }
+            // N_TRIGGER is handled in parsemessages() below (channel 1), alongside N_ITEMSPAWN
+            // and the welcome-packet stream that replays cached trigger states for late joiners.
 
             default:
                 neterr("type");
@@ -1686,6 +1679,16 @@ namespace game
                     entities::pickupeffects(i, d);
                 }
                 else entities::setspawn(i, true);
+                break;
+            }
+
+            case N_TRIGGER:
+            {
+                // Sent by a peer (live state change) or by the server's late-joiner replay
+                // inside the welcome packet. Apply locally with broadcast=false so we don't
+                // echo it back.
+                int idx = getint(p), state = getint(p);
+                entities::settriggerstate(idx, state, false);
                 break;
             }
 

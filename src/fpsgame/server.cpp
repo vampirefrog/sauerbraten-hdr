@@ -3332,11 +3332,13 @@ namespace server
                 // Coop trigger sync. We don't run the state machine here -- the server is just a
                 // relay + a persistent cache so late joiners get the current door states. We
                 // store every non-RESET state we see; sendwelcome() replays them to joiners.
+                // Channel 1 matches N_ITEMSPAWN / the welcome packet, so the client handles all
+                // trigger traffic in one place.
                 int idx = getint(p), state = getint(p);
                 if(idx < 0 || idx >= MAXENTS) break;
                 while(triggerstates.length() <= idx) triggerstates.add(TRIGGER_RESET);
                 triggerstates[idx] = state;
-                sendf(-1, 0, "ri3x", N_TRIGGER, idx, state, sender);
+                sendf(-1, 1, "ri3x", N_TRIGGER, idx, state, sender);
                 break;
             }
                 

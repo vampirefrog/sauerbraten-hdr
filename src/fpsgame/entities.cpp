@@ -530,7 +530,9 @@ namespace entities
         putint(p, N_TRIGGER);
         putint(p, idx);
         putint(p, newstate);
-        sendclientpacket(p.finalize(), 0);
+        // Channel 1 (general game events) -- same as N_ITEMSPAWN / N_ITEMACC and the welcome
+        // packet, so trigger state lives in one place and the client only needs a single case.
+        sendclientpacket(p.finalize(), 1);
     }
 
     // Single chokepoint for trigger state transitions. Pass broadcast=true when the local player
