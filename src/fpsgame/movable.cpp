@@ -107,9 +107,17 @@ namespace game
     // `platform` command, typed by a user or run from a trigger script that's already broadcast
     // its own N_TRIGGER); broadcast=false for the receive side and for the server's late-joiner
     // replay so we don't echo.
+    //
+    // Also: when broadcasting, we tag each affected platform's current position into an
+    // N_PLATFORMSTATE message in the same packet -- the triggerer is the natural authority for
+    // the platform's state at the moment of triggering, so the server's cache gets accurate
+    // immediately. The periodic lowest-clientnum-only N_PLATFORMSTATE refresh (see
+    // broadcastplatformstates below) then handles drift, plus the auto-moving-from-map-start
+    // platforms that never get triggered by anyone.
     void triggerplatform(int tag, int newdir, bool broadcast)
     {
         newdir = max(-1, min(1, newdir));
+        vector<int> affected;
         loopv(movables)
         {
             movable *m = movables[i];
@@ -124,13 +132,36 @@ namespace game
                 if(m->etype==PLATFORM) { vecfromyawpitch(m->yaw, 0, 1, 0, m->vel); m->vel.mul(newdir*m->dir*m->maxspeed); }
                 else m->vel = vec(0, 0, newdir*m->dir*m->maxspeed);
             }
+            if(broadcast) affected.add(i);
         }
         if(broadcast && player1->clientnum >= 0)
         {
-            packetbuf p(16, ENET_PACKET_FLAG_RELIABLE);
+            packetbuf p(8 + 16 + affected.length()*40, ENET_PACKET_FLAG_RELIABLE);
             putint(p, N_PLATFORM);
             putint(p, tag);
             putint(p, newdir);
+            loopv(affected)
+            {
+                int idx = affected[i];
+                movable *m = movables[idx];
+                putint(p, N_PLATFORMSTATE);
+                putint(p, idx);
+                ivec ipos(vec(m->o).mul(DMF));
+                putint(p, ipos.x);
+                putint(p, ipos.y);
+                putint(p, ipos.z);
+                // Direction sign relative to the platform's reference axis, same convention
+                // applyremoteplatformstate consumes.
+                int signdir;
+                if(!newdir) signdir = 0;
+                else if(m->etype == PLATFORM)
+                {
+                    vec axis; vecfromyawpitch(m->yaw, 0, 1, 0, axis);
+                    signdir = axis.dot(m->vel) >= 0 ? +1 : -1;
+                }
+                else signdir = m->vel.z >= 0 ? +1 : -1;
+                putint(p, signdir);
+            }
             sendclientpacket(p.finalize(), 1);
         }
     }
