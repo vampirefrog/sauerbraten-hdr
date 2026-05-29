@@ -239,15 +239,15 @@ namespace game
     }
 
     // Authority broadcasts pos+vel for every moving movable so peers see the same physics. We
-    // skip stationary movables (vel.iszero() && not stacked-on-moving) to keep bandwidth low.
-    // Runs at ~5Hz; combined with the trigger-time piggyback below and per-explosion event
-    // broadcasts, peers stay within ~200ms of authority for everything that's actually changing.
+    // skip stationary movables (vel.iszero() && nothing pending) to keep bandwidth low. Runs
+    // at 20Hz -- non-authority clients extrapolate from the last snap to fill the gap, so 50ms
+    // of error is roughly one frame of imperceptible drift even on barrels in free-fall.
     static int lastmovablestatesend = 0;
     void broadcastmovablestates()
     {
         if(player1->clientnum < 0) return;
         if(!ismovableauthority()) return;
-        if(lastmillis - lastmovablestatesend < 200) return;
+        if(lastmillis - lastmovablestatesend < 50) return;
         vector<int> moving;
         loopv(movables)
         {
@@ -308,6 +308,16 @@ namespace game
         sendclientpacket(p.finalize(), 1);
     }
 
+    // Every client runs full local physics so movables behave reasonably between authority
+    // snaps (smooth motion, player riding, basic collision feedback). The 20Hz N_MOVABLESTATE
+    // broadcasts from the lowest-clientnum authority then OVERWRITE positions + velocities at
+    // 50ms intervals, so any locally-computed divergence gets corrected before it can cascade
+    // (e.g. a non-authority platform reversing against a wrong-position barrel).
+    //
+    // Side effects that mutate state -- the explode timer firing, suicidemovable, hitmovable's
+    // damage path -- are gated to specific per-event authorities (shooter for damage, the
+    // falling player for suicide) so we don't get duplicate explosions even though everyone
+    // runs the physics loop.
     void updatemovables(int curtime)
     {
         if(!curtime) return;
