@@ -838,6 +838,15 @@ ICOMMAND(entmoving, "b", (int *n),
     intret(entmoving);
 });
 
+// Preprocessor directives can't live inside an ICOMMAND macro call (MSVC enforces this; gcc was
+// permissive). Pull the conditional patch-cancel out into a small helper instead.
+#ifndef STANDALONE
+extern void patchcancel();
+static inline void patchcancel_ifclient() { patchcancel(); }
+#else
+static inline void patchcancel_ifclient() {}
+#endif
+
 // left-click variant: select ONLY the hovered entity (unless it's already in the selection, in which case
 // keep the group so a drag moves all of it), then move. entmoving keeps its add-to-selection behaviour.
 ICOMMAND(entmovingsel, "b", (int *n),
@@ -850,10 +859,7 @@ ICOMMAND(entmovingsel, "b", (int *n),
             if(entgroup.find(enthover) < 0)
             {
                 entgroup.setsize(0);
-#ifndef STANDALONE
-                extern void patchcancel();   // selecting only this entity clears any control-point selection too
-                patchcancel();
-#endif
+                patchcancel_ifclient();   // selecting only this entity clears any control-point selection too
                 entadd(enthover);
             }
             entmoving = 1;
