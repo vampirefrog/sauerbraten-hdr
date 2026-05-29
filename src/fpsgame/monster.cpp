@@ -487,14 +487,117 @@ namespace game
         }
     }
 
+    static fpsent *getclientorplayer(int cn)
+    {
+        if(cn == player1->clientnum) return player1;
+        return getclient(cn);
+    }
+
+    // Authority side: the monster's owner applies the actual HP drop. May kill, in which
+    // case we broadcast N_MONSTERDIED so peers stop ticking / rendering this monster.
+    static void applymonsterdamage(int idx, int damage, fpsent *attacker)
+    {
+        if(!monsters.inrange(idx)) return;
+        monster *m = monsters[idx];
+        if(m->state != CS_ALIVE) return;
+        int prevstate = m->state;
+        m->monsterpain(damage, attacker);     // existing path: HP, pain transition or kill
+        if(prevstate == CS_ALIVE && m->state == CS_DEAD && player1->clientnum >= 0)
+        {
+            packetbuf p(16, ENET_PACKET_FLAG_RELIABLE);
+            putint(p, N_MONSTERDIED);
+            putint(p, idx);
+            putint(p, attacker ? attacker->clientnum : -1);
+            sendclientpacket(p.finalize(), 1);
+        }
+    }
+
+    void parsemonsterhit(int idx, int damage, int attackercn)
+    {
+        if(!monsters.inrange(idx)) return;
+        monster *m = monsters[idx];
+        if(m->state != CS_ALIVE) return;
+        if(ownsmonster(idx))
+        {
+            // Owner: full pain handling (HP + state + animation + possible kill).
+            fpsent *attacker = getclientorplayer(attackercn);
+            if(!attacker) attacker = player1;
+            applymonsterdamage(idx, damage, attacker);
+        }
+        else
+        {
+            // Non-owner: just play the visual / audio so it feels like a hit landed.
+            damageeffect(damage, m);
+            playsound(monstertypes[m->mtype].painsound, &m->o);
+        }
+    }
+
+    void parsemonsterdied(int idx, int attackercn)
+    {
+        if(!monsters.inrange(idx)) return;
+        monster *m = monsters[idx];
+        if(m->state != CS_ALIVE) return;
+        // Mark dead; mimic the tail of monsterpain()'s death branch but skip the kill broadcast
+        // (we ARE the broadcast receivers). monsterkilled() updates everyone's local kill count.
+        m->state = CS_DEAD;
+        m->lastpain = lastmillis;
+        playsound(monstertypes[m->mtype].diesound, &m->o);
+        monsterkilled();
+        // gib effect uses health magnitude; we don't have it on receivers, use a constant.
+        gibeffect(50, m->vel, m);
+        defformatstring(id, "monster_dead_%d", m->tag);
+        execident(id);
+    }
+
     void suicidemonster(monster *m)
     {
+        // SP fallthrough: existing behaviour. In MP, if we don't own the monster we route the
+        // suicide through the same N_MONSTERHIT path so the owner applies it.
+        int idx = monsters.find(m);
+        if(idx >= 0 && !ownsmonster(idx) && player1->clientnum >= 0)
+        {
+            packetbuf p(16, ENET_PACKET_FLAG_RELIABLE);
+            putint(p, N_MONSTERHIT);
+            putint(p, idx);
+            putint(p, 400);
+            putint(p, player1->clientnum);
+            sendclientpacket(p.finalize(), 1);
+            return;
+        }
         m->monsterpain(400, player1);
     }
 
     void hitmonster(int damage, monster *m, fpsent *at, const vec &vel, int gun)
     {
-        m->monsterpain(damage, at);
+        // Per-event authority: only the shooter (at==player1) acts on a hit. Peers running
+        // their own hit() in response to N_SHOTFX just return -- the shooter will send
+        // N_MONSTERHIT, the owner will broadcast back any resulting state changes.
+        if(at != player1) return;
+        int idx = monsters.find(m);
+        if(idx < 0) return;
+        if(ownsmonster(idx))
+        {
+            // Shooter is also the owner: apply directly, no round-trip.
+            applymonsterdamage(idx, damage, at);
+        }
+        else if(player1->clientnum >= 0)
+        {
+            // Shooter feedback locally (so the hit feels instant); owner gets the
+            // authoritative N_MONSTERHIT and decides what actually happens to HP.
+            damageeffect(damage, m);
+            playsound(monstertypes[m->mtype].painsound, &m->o);
+            packetbuf p(16, ENET_PACKET_FLAG_RELIABLE);
+            putint(p, N_MONSTERHIT);
+            putint(p, idx);
+            putint(p, damage);
+            putint(p, at->clientnum);
+            sendclientpacket(p.finalize(), 1);
+        }
+        else
+        {
+            // Single-player / not connected -- original behaviour.
+            m->monsterpain(damage, at);
+        }
     }
 
     void spsummary(int accuracy)

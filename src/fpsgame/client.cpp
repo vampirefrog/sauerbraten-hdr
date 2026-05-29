@@ -1699,6 +1699,20 @@ namespace game
                 break;
             }
 
+            case N_MONSTERHIT:
+            {
+                int idx = getint(p), damage = getint(p), attackercn = getint(p);
+                parsemonsterhit(idx, damage, attackercn);
+                break;
+            }
+
+            case N_MONSTERDIED:
+            {
+                int idx = getint(p), attackercn = getint(p);
+                parsemonsterdied(idx, attackercn);
+                break;
+            }
+
             case N_CLIPBOARD:
             {
                 int cn = getint(p), unpacklen = getint(p), packlen = getint(p);

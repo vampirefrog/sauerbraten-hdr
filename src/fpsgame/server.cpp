@@ -3422,6 +3422,22 @@ namespace server
                 break;
             }
 
+            case N_MONSTERHIT:
+            {
+                // Shooter -> owner (and all peers for visual feedback). Reliable, channel 1.
+                int idx = getint(p), damage = getint(p), attackercn = getint(p);
+                sendf(-1, 1, "ri4x", N_MONSTERHIT, idx, damage, attackercn, sender);
+                break;
+            }
+
+            case N_MONSTERDIED:
+            {
+                // Owner -> all peers. Reliable, channel 1.
+                int idx = getint(p), attackercn = getint(p);
+                sendf(-1, 1, "ri3x", N_MONSTERDIED, idx, attackercn, sender);
+                break;
+            }
+
             case N_TRIGGER:
             {
                 // Coop trigger sync. We don't run the state machine here -- the server is just a
