@@ -304,7 +304,7 @@ namespace game
     {
         removetrackedparticles();
         removetrackeddynlights();
-        loopv(monsters) delete monsters[i]; 
+        loopv(monsters) delete monsters[i];
         cleardynentcache();
         monsters.shrink(0);
         numkilled = 0;
@@ -317,14 +317,19 @@ namespace game
             nextmonster = mtimestart = lastmillis+10000;
             monstertotal = spawnremain = skill*10;
         }
-        else if(m_classicsp)
+        else
         {
+            // Map-placed monsters from MONSTER entities. Was gated to m_classicsp; we now run
+            // this in every non-DMSP mode so coop on SP maps gets its monsters. PvP maps don't
+            // have MONSTER entities, so this loop is a no-op there. Each client iterates the
+            // entity list in identical order so the resulting `monsters` vector indices match
+            // across peers without any negotiation.
             mtimestart = lastmillis;
             loopv(entities::ents)
             {
                 extentity &e = *entities::ents[i];
                 if(e.type!=MONSTER) continue;
-                monster *m = new monster(e.attr2, e.attr1, e.attr3, M_SLEEP, 100, 0);  
+                monster *m = new monster(e.attr2, e.attr1, e.attr3, M_SLEEP, 100, 0);
                 monsters.add(m);
                 m->o = e.o;
                 entinmap(m);
@@ -332,11 +337,10 @@ namespace game
                 monstertotal++;
             }
         }
+        // Teleports: ungating too, same reasoning -- monsters that hit a teleport need it
+        // in MP modes the same as in SP.
         teleports.setsize(0);
-        if(m_dmsp || m_classicsp)
-        {
-            loopv(entities::ents) if(entities::ents[i]->type==TELEPORT) teleports.add(i);
-        }
+        loopv(entities::ents) if(entities::ents[i]->type==TELEPORT) teleports.add(i);
     }
 
     void endsp(bool allkilled)
@@ -356,21 +360,51 @@ namespace game
         if(remain>0 && remain<=5) conoutf(CON_GAMEINFO, "\f2only %d monster(s) remaining", remain);
     }
 
+    // Per-monster ownership policy. Returns the clientnum of the client that owns monster idx
+     // -- the one that ticks its AI + physics and broadcasts its position. Default policy is
+     // round-robin across all connected clientnums sorted ascending; with one player this is
+     // simply that player. Owner changes implicitly when someone joins/leaves because the
+     // round-robin recomputes against the current clients list each tick. Local hot-swap
+     // mid-action is fine: the new owner's first tick reads the monster's current state and
+     // continues from there.
+    static int monsterowner(int idx)
+    {
+        if(player1->clientnum < 0) return -1;       // not connected -> single-player; we own everything
+        static vector<int> nums;
+        nums.setsize(0);
+        nums.add(player1->clientnum);
+        loopv(clients) if(clients[i] && clients[i] != player1 && clients[i]->clientnum >= 0)
+            nums.add(clients[i]->clientnum);
+        if(nums.empty()) return -1;
+        nums.sort();
+        return nums[idx % nums.length()];
+    }
+
+    static inline bool ownsmonster(int idx)
+    {
+        int o = monsterowner(idx);
+        return o < 0 || o == player1->clientnum;    // -1 == single-player => we own everything
+    }
+
     void updatemonsters(int curtime)
     {
-        if(m_dmsp && spawnremain && lastmillis>nextmonster)
+        // Random DMSP spawning only fires on the lowest-clientnum (which is owner of idx 0).
+        // We'll broadcast spawned monsters via N_MONSTERSPAWN in a later phase; for now the
+        // single-authority gate keeps the random-spawn rng from rolling on every client.
+        if(m_dmsp && spawnremain && lastmillis>nextmonster && ownsmonster(0))
         {
             if(spawnremain--==monstertotal) { conoutf(CON_GAMEINFO, "\f2The invasion has begun!"); playsound(S_V_FIGHT); }
             nextmonster = lastmillis+1000;
             spawnmonster();
         }
-        
+
         if(killsendsp && monstertotal && !spawnremain && numkilled==monstertotal) endsp(true);
-        
+
         bool monsterwashurt = monsterhurt;
-        
+
         loopv(monsters)
         {
+            if(!ownsmonster(i)) continue;       // someone else ticks this monster's AI + physics
             if(monsters[i]->state==CS_ALIVE) monsters[i]->monsteraction(curtime);
             else if(monsters[i]->state==CS_DEAD)
             {
@@ -382,7 +416,7 @@ namespace game
                 }
             }
         }
-        
+
         if(monsterwashurt) monsterhurt = false;
     }
 
