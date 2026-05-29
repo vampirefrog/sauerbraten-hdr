@@ -224,9 +224,15 @@ namespace game
         return true;
     }
 
-    // Snap a movable's transform to the authority's broadcast. Authoritative for all movables
-    // (platforms / elevators / barrels / boxes); the next local physics tick continues from the
-    // snapped state so the visual is close to the authority view between snaps.
+    // Snap a movable's transform to the authority's broadcast.
+    //
+    // IMPORTANT: do NOT call entinmap() here. entinmap is the spawn-spot helper -- it ADDS
+    // eyeheight to d->o because it expects a feet-position input (see physics.cpp). The
+    // authority broadcasts m->o which is already in the dynent's center / eye frame, so a
+    // second entinmap raises the receiver's movable by one eyeheight above the authority's.
+    // For tall models (platforms, barrels) that puts them noticeably above where they should
+    // be, which then makes their local "collide with level geometry" tests fire at the wrong
+    // times -- the symptom we were seeing as platform shake.
     void applyremotemovablestate(int idx, const vec &pos, const vec &vel)
     {
         if(!movables.inrange(idx)) return;
@@ -234,7 +240,6 @@ namespace game
         if(m->state != CS_ALIVE) return;
         m->o = pos;
         m->vel = vel;
-        entinmap(m);
         updatedynentcache(m);
     }
 
