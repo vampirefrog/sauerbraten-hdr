@@ -386,6 +386,57 @@ namespace game
         return o < 0 || o == player1->clientnum;    // -1 == single-player => we own everything
     }
 
+    // -- Coop networking ---------------------------------------------------------------------
+    // 10Hz position broadcast, one packet per owned monster. Fixed-size message keeps the
+    // server relay trivial (sendf with the exclude-sender suffix). Unreliable channel 0
+    // because positions are continuous -- a lost packet is replaced within 100ms.
+    static int lastmonsterpossent = 0;
+    void broadcastmonsterpos()
+    {
+        if(player1->clientnum < 0) return;
+        if(lastmillis - lastmonsterpossent < 100) return;
+        lastmonsterpossent = lastmillis;
+        loopv(monsters)
+        {
+            if(monsters[i]->state != CS_ALIVE || !ownsmonster(i)) continue;
+            monster *m = monsters[i];
+            packetbuf p(32, 0);                     // unreliable; channel 0
+            putint(p, N_MONSTERPOS);
+            putint(p, i);
+            putint(p, int(m->o.x * DMF));
+            putint(p, int(m->o.y * DMF));
+            putint(p, int(m->o.z * DMF));
+            putint(p, int(m->yaw));
+            putint(p, int(m->pitch));
+            putint(p, m->monsterstate);
+            putint(p, m->move);
+            sendclientpacket(p.finalize(), 0);
+        }
+    }
+
+    // Receive side: snap our local monster to the owner's broadcast. Non-owners do no AI/
+    // physics, so the snap is the visual. (Smooth interpolation between snapshots is a
+    // separate phase on top of this.)
+    void parsemonsterpos(ucharbuf &p)
+    {
+        int idx = getint(p);
+        vec o;
+        o.x = getint(p) / DMF;
+        o.y = getint(p) / DMF;
+        o.z = getint(p) / DMF;
+        int yaw = getint(p), pitch = getint(p);
+        int mstate = getint(p);
+        int mv = getint(p);
+        if(!monsters.inrange(idx)) return;
+        monster *m = monsters[idx];
+        if(m->state != CS_ALIVE) return;
+        if(ownsmonster(idx)) return;                // it's ours; ignore the server's relay back
+        m->o = o; m->yaw = float(yaw); m->pitch = float(pitch);
+        m->monsterstate = mstate;
+        m->move = mv;
+        updatedynentcache(m);
+    }
+
     void updatemonsters(int curtime)
     {
         // Random DMSP spawning only fires on the lowest-clientnum (which is owner of idx 0).

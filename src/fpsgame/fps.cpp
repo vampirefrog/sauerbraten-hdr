@@ -253,6 +253,9 @@ namespace game
         gets2c();
         updatemovables(curtime);
         updatemonsters(curtime);
+        // 10Hz position broadcast: each client owns ~1/N of the monsters (round-robin
+        // policy in monster.cpp) and reports them so peers can render the AI authority's view.
+        broadcastmonsterpos();
         if(connected)
         {
             if(player1->state == CS_DEAD)

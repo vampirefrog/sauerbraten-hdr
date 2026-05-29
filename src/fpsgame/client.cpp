@@ -1263,6 +1263,13 @@ namespace game
                 entities::jumppadeffects(d, jp, false);
                 break;
             }
+
+            case N_MONSTERPOS:
+                // Position snapshot stream from a monster's owner. Continuous data on the
+                // position channel; loss is acceptable because the next packet is 100ms away.
+                parsemonsterpos(p);
+                break;
+
             // N_TRIGGER is handled in parsemessages() below (channel 1), alongside N_ITEMSPAWN
             // and the welcome-packet stream that replays cached trigger states for late joiners.
 
