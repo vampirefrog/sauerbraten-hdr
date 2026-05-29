@@ -187,7 +187,10 @@ struct gltf {
     struct material {
         bool doubleSided;
         string name;
-        enum { OPAQUE, MASK, BLEND } alphaMode;
+        // MSVC's <wingdi.h> #defines OPAQUE to 1, which would expand inside this enum and break
+        // it. Using ALPHA_-prefixed names keeps the source identical between the unqualified
+        // refs below and the JSON we emit (the string table is kept in sync explicitly).
+        enum { ALPHA_OPAQUE, ALPHA_MASK, ALPHA_BLEND } alphaMode;
         struct {
             struct { int index; int texCoord; } baseColorTexture;
             vec4 baseColorFactor;
@@ -213,7 +216,7 @@ struct gltf {
         material() {
             doubleSided = false;
             name[0] = 0;
-            alphaMode = OPAQUE;
+            alphaMode = ALPHA_OPAQUE;
             pbrMetallicRoughness.baseColorTexture.index = -1;
             pbrMetallicRoughness.baseColorTexture.texCoord = 0;
             pbrMetallicRoughness.baseColorFactor = vec4(1, 1, 1, 1);
