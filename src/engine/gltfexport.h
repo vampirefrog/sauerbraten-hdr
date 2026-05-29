@@ -6,6 +6,8 @@
 #ifndef GLTFEXPORT_H
 #define GLTFEXPORT_H
 
+#include <float.h>     // FLT_MAX -- MSVC doesn't pull it in transitively from engine.h
+
 // Texture URIs in a glTF resolve relative to the .gltf's location. Sauer writes the .gltf to
 // homedir, but the diffuse/normal/glow textures live in <root>/packages/. We resolve each logical
 // name to its actual disk path via Sauer's findfile() and then absolutise via realpath(), so the
