@@ -132,7 +132,8 @@ struct gltf {
 
     struct mesh {
         string name;
-        vector<gltf::primitive> primitives;
+        // Sibling nested struct -- unqualified for MSVC (see note on the outer member list).
+        vector<primitive> primitives;
 
         void serialize(stream *f) {
             f->printf("{\"name\":\"%s\",\"primitives\":[", name);
@@ -375,17 +376,19 @@ struct gltf {
         void serialize(stream *f) { f->printf("{\"uri\":\"%s\",\"byteLength\":%d}", uri, byteLength); }
     };
 
-    vector<gltf::scene>      scenes;
-    vector<gltf::light>      lights;
-    vector<gltf::node>       nodes;
-    vector<gltf::mesh>       meshes;
-    vector<gltf::accessor>   accessors;
-    vector<gltf::bufferView> bufferViews;
-    vector<gltf::material>   materials;
-    vector<gltf::image>      images;
-    vector<gltf::texture>    textures;
-    vector<gltf::buffer>     buffers;
-    vector<gltf::sampler>    samplers;
+    // Member names use unqualified nested types -- MSVC rejects `gltf::scene` etc. inside the
+    // (still-incomplete) gltf struct's own definition, while gcc was happy to resolve it.
+    vector<scene>      scenes;
+    vector<light>      lights;
+    vector<node>       nodes;
+    vector<mesh>       meshes;
+    vector<accessor>   accessors;
+    vector<bufferView> bufferViews;
+    vector<material>   materials;
+    vector<image>      images;
+    vector<texture>    textures;
+    vector<buffer>     buffers;
+    vector<sampler>    samplers;
 
     int write(const char *fname) {
         stream *f = openfile(fname, "w");
