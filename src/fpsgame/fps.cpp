@@ -252,11 +252,6 @@ namespace game
         moveragdolls();
         gets2c();
         updatemovables(curtime);
-        // ~5Hz authority broadcast of moving movables (platforms, elevators, barrels, boxes).
-        // Receivers snap their local state to ours so everyone agrees on positions+velocities;
-        // the server also caches the latest snapshot for the welcome packet so late joiners
-        // pick up in-flight movables at the right spot.
-        broadcastmovablestates();
         updatemonsters(curtime);
         if(connected)
         {

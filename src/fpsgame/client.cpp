@@ -1692,36 +1692,6 @@ namespace game
                 break;
             }
 
-            case N_PLATFORM:
-            {
-                // Direction change from a peer's `platform` cubescript invocation, or from the
-                // server's welcome-packet replay. Apply locally without re-broadcasting.
-                int tag = getint(p), dir = getint(p);
-                triggerplatform(tag, dir, false);
-                break;
-            }
-
-            case N_MOVABLESTATE:
-            {
-                // 5Hz authority broadcast: snap our local movable to the authority's pos+vel.
-                // Same handler covers the live relay AND the welcome replay for late joiners.
-                int idx = getint(p);
-                vec pos;
-                loopk(3) pos[k] = getint(p)/DMF;
-                vec vel;
-                loopk(3) vel[k] = getint(p)/DNF;
-                applyremotemovablestate(idx, pos, vel);
-                break;
-            }
-
-            case N_MOVABLEEXPLODE:
-            {
-                // Authority decided a barrel exploded. Run the local visual + mark dead.
-                int idx = getint(p);
-                applyremotemovableexplode(idx);
-                break;
-            }
-
             case N_CLIPBOARD:
             {
                 int cn = getint(p), unpacklen = getint(p), packlen = getint(p);

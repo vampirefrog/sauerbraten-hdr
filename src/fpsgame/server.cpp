@@ -776,28 +776,12 @@ namespace server
     // state everyone else sees. Cleared on map change alongside items.
     vector<int> triggerstates;
 
-    // Coop platform / movable state cache. We don't run physics, we record:
-    //   * the latest direction change (N_PLATFORM by tag), for welcome replay so a joiner gets
-    //     the right heading on triggered platforms;
-    //   * the latest 5Hz state snapshot (N_MOVABLESTATE by movable index, pos+vel) -- this is
-    //     also live-relayed to peers so everyone snaps to the authority's view, and replayed
-    //     on welcome so late joiners spawn movables already mid-flight;
-    //   * the set of exploded barrels (N_MOVABLEEXPLODE by movable index), replayed on welcome
-    //     so a joiner doesn't see destroyed barrels back alive.
-    hashtable<int, int> platformdirs;
-    struct movablecache { ivec ipos, ivel; };
-    hashtable<int, movablecache> movablestates;
-    vector<int> explodedmovables;
-
     void resetitems()
     {
         mcrc = 0;
         ments.setsize(0);
         sents.setsize(0);
         triggerstates.setsize(0);
-        platformdirs.clear();
-        movablestates.clear();
-        explodedmovables.setsize(0);
         //cps.reset();
     }
 
@@ -2160,35 +2144,6 @@ namespace server
             putint(p, i);
             putint(p, triggerstates[i]);
         }
-        // Replay cached platform direction overrides (tag -> dir): puts a joiner's platforms in
-        // the same heading peers already see, so the next moveplatform tick continues from the
-        // right vector instead of the map-default direction.
-        enumeratekt(platformdirs, int, tag, int, dir,
-        {
-            putint(p, N_PLATFORM);
-            putint(p, tag);
-            putint(p, dir);
-        });
-        // Replay the latest 5Hz movable snapshots. Without this the joiner would create
-        // movables at the map-default positions and have to wait up to 200ms for the
-        // authority's next broadcast to correct them.
-        enumeratekt(movablestates, int, idx, movablecache, pc,
-        {
-            putint(p, N_MOVABLESTATE);
-            putint(p, idx);
-            putint(p, pc.ipos.x);
-            putint(p, pc.ipos.y);
-            putint(p, pc.ipos.z);
-            putint(p, pc.ivel.x);
-            putint(p, pc.ivel.y);
-            putint(p, pc.ivel.z);
-        });
-        // Mark already-exploded barrels as dead so the joiner doesn't see them respawned.
-        loopv(explodedmovables)
-        {
-            putint(p, N_MOVABLEEXPLODE);
-            putint(p, explodedmovables[i]);
-        }
         bool hasmaster = false;
         if(mastermode != MM_OPEN)
         {
@@ -3465,46 +3420,6 @@ namespace server
                 while(triggerstates.length() <= idx) triggerstates.add(TRIGGER_RESET);
                 triggerstates[idx] = state;
                 sendf(-1, 1, "ri3x", N_TRIGGER, idx, state, sender);
-                break;
-            }
-
-            case N_PLATFORM:
-            {
-                // Cubescript-driven direction change. Relay + cache.
-                int tag = getint(p), dir = getint(p);
-                platformdirs[tag] = dir;
-                sendf(-1, 1, "ri3x", N_PLATFORM, tag, dir, sender);
-                break;
-            }
-
-            case N_MOVABLESTATE:
-            {
-                // 5Hz authority snapshot for every moving movable. We both cache (welcome
-                // replay for late joiners) AND live-relay to all other clients so the
-                // authority's view is what everyone renders.
-                int idx = getint(p);
-                ivec ipos; ipos.x = getint(p); ipos.y = getint(p); ipos.z = getint(p);
-                ivec ivel; ivel.x = getint(p); ivel.y = getint(p); ivel.z = getint(p);
-                if(idx < 0) break;
-                movablecache pc; pc.ipos = ipos; pc.ivel = ivel;
-                movablestates[idx] = pc;
-                sendf(-1, 1, "ri8x", N_MOVABLESTATE, idx, ipos.x, ipos.y, ipos.z, ivel.x, ivel.y, ivel.z, sender);
-                break;
-            }
-
-            case N_MOVABLEEXPLODE:
-            {
-                // Authority (the shooter, or whoever caused the suicide) is telling us this
-                // barrel exploded. With per-event authority a single barrel can briefly have
-                // two clients broadcast (e.g. two players both fall on the same barrel at the
-                // same instant); drop redundant relays so peers only see one explosion.
-                int idx = getint(p);
-                if(idx < 0) break;
-                if(explodedmovables.find(idx) >= 0) break;
-                explodedmovables.add(idx);
-                // Drop any cached movement state -- nothing meaningful to replay for a dead barrel.
-                movablestates.remove(idx);
-                sendf(-1, 1, "ri2x", N_MOVABLEEXPLODE, idx, sender);
                 break;
             }
                 
