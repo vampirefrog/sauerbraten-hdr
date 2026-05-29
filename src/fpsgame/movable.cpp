@@ -303,40 +303,46 @@ namespace game
         sendclientpacket(p.finalize(), 1);
     }
 
+    // Helper used inside the authority's physics tick: emit a single-movable N_MOVABLESTATE
+    // immediately, without waiting for the next 50ms periodic broadcast. We use it on platform
+    // reversal (world collision) so peers learn about the direction change within network RTT
+    // instead of up to 50ms later. Without this, non-authority clients see the platform jerk
+    // back to authority position at every reversal.
+    static void sendsinglemovablestate(int idx)
+    {
+        if(player1->clientnum < 0) return;
+        if(!movables.inrange(idx)) return;
+        movable *m = movables[idx];
+        packetbuf p(32, ENET_PACKET_FLAG_RELIABLE);
+        putint(p, N_MOVABLESTATE);
+        putint(p, idx);
+        ivec ipos(vec(m->o).mul(DMF));
+        putint(p, ipos.x); putint(p, ipos.y); putint(p, ipos.z);
+        ivec ivel(vec(m->vel).mul(DNF));
+        putint(p, ivel.x); putint(p, ivel.y); putint(p, ivel.z);
+        sendclientpacket(p.finalize(), 1);
+    }
+
     // ONE source of truth for movable physics: the lowest-clientnum authority runs the full
     // simulation (collision, gravity, stacking, the explode timer, platform reversal on world
-    // collision). Non-authority clients DO NOT simulate -- they linearly extrapolate position
-    // from the last received velocity so motion stays smooth between the 20Hz snaps. Without
-    // local collision, the non-authority can't tunnel through anything, hit ghost barrels, or
-    // collide a platform with the wrong things: it just rides whatever the authority broadcasts.
+    // collision). Non-authority clients DO NOT simulate AND DO NOT extrapolate -- they just hold
+    // the last snapped position until the next snap arrives. Extrapolating with stale velocity
+    // overshoots around collisions and produces visible shake at every snap, plus makes the
+    // dynent cache too unstable to ride. Snap-and-hold + event-driven broadcasts on platform
+    // reversals = stable platform on non-authority that the player can actually land on.
     //
-    // Shooter-side feedback still works: hitmovable's at==player1 branch sets m->vel locally,
-    // and the extrapolation below picks up that new velocity immediately, so the shooter sees
-    // their barrel react this frame even though the authority is the one who'll evolve the
-    // post-push physics. Same goes for triggerplatform: the local vel change is felt right away.
-    //
-    // Known trade-off: a non-authority player can't push a barrel by walking into it (no local
-    // collision) and pays ~50ms of round-trip lag for that kind of interaction. We'll layer
-    // optimisations (shooter-temporary-authority, predict-and-reconcile) on top once the basic
-    // physics is solid.
+    // Shooter-side feedback still works: hitmovable's at==player1 branch sets m->vel locally
+    // and broadcasts N_MOVABLESTATE, so the shooter's pushed barrel jumps to the new state
+    // immediately, peers see it within RTT, and the authority picks it up + evolves the
+    // post-push physics for the next periodic snap.
     void updatemovables(int curtime)
     {
         if(!curtime) return;
-        const bool isauth = ismovableauthority();
+        if(!ismovableauthority()) return;
         loopv(movables)
         {
             movable *m = movables[i];
             if(m->state!=CS_ALIVE) continue;
-            if(!isauth)
-            {
-                if(!m->vel.iszero())
-                {
-                    m->o.add(vec(m->vel).mul(curtime/1000.0f));
-                    entinmap(m);
-                    updatedynentcache(m);
-                }
-                continue;
-            }
             if(m->etype==PLATFORM || m->etype==ELEVATOR)
             {
                 if(m->vel.iszero()) continue;
@@ -348,6 +354,11 @@ namespace game
                     {
                         if(m->tag) { m->vel = vec(0, 0, 0); break; }
                         else m->vel.neg();
+                        // Event-driven broadcast: peers learn about the reversal immediately
+                        // rather than waiting up to 50ms for the next periodic snap. Without
+                        // this, the next snap drags their platform back across the reversal
+                        // gap visibly.
+                        sendsinglemovablestate(i);
                     }
                 }
             }
