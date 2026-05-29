@@ -240,7 +240,40 @@ for sky/sun brightness (the sun disk is unclamped under `hdr`, so push these hig
 | `patchprojaxis` / `patchnaturalize` / `patchfit u v` | recompute the active patch's per-CP UVs (axis-aligned planar projection / arc-length natural / fit to (u,v) tiles) |
 | `patchcount` | print/return the number of patches in the map |
 | `clearpatches` | delete every patch (undoable) |
-| `writegltf <name>` | export the current map as `<name>.gltf` + `<name>.bin`, with each HDR lightmap atlas page emitted as a tonemapped `<name>_lm<N>.png` AND a linear-light Radiance `<name>_lm<N>.hdr`. Materials wire the lightmap into `emissiveTexture` on `TEXCOORD_1`, with the page's peak luminance carried as `KHR_materials_emissive_strength` so HDR-aware viewers (three.js, glTF Sample Viewer) reproduce real brightness. LDR viewers see the tonemapped PNG. Sun + point-light entities are exported as `KHR_lights_punctual`. `extensionsRequired` is `KHR_mesh_quantization`. |
+| `writegltf <name>` | export the current map as `<name>.gltf` + `<name>.bin`, with each HDR lightmap atlas page emitted as a tonemapped `<name>_lm<N>.png` AND a linear-light Radiance `<name>_lm<N>.hdr`. Materials wire the lightmap into `emissiveTexture` on `TEXCOORD_1`, with the page's peak luminance carried as `KHR_materials_emissive_strength` so HDR-aware viewers (three.js, glTF Sample Viewer) reproduce real brightness. LDR viewers see the tonemapped PNG. Sun + point-light entities are exported as `KHR_lights_punctual`. `extensionsRequired` is `KHR_mesh_quantization`. Lightmap-bearing materials are also tagged with a custom `SAUER_lightmap` extension that the companion Blender importer (see below) uses to rewire them. |
+
+## Blender importer companion
+
+For round-tripping into Blender, `tools/blender/io_scene_sauerbraten_lightmap.py` is a glTF import-hook addon
+that recognises the `SAUER_lightmap` extension and rewires those materials so the lightmap multiplies the
+base colour and feeds an `Emission` shader, then mixes it against the Principled BSDF via a `Mix Shader` —
+keeping Cycles bounce lighting usable instead of plugging the lightmap straight into the BSDF's emissive slot.
+
+Install (Linux):
+
+```
+ln -s "$PWD/tools/blender/io_scene_sauerbraten_lightmap.py" \
+      ~/.config/blender/<version>/scripts/addons/
+```
+
+Then in Blender: `Edit > Preferences > Add-ons`, search for *Sauerbraten*, and enable. After that, when
+you open `File > Import > glTF 2.0` the file-browser's right-hand panel grows a **User Extensions**
+section, and inside it a **Sauerbraten Lightmap** box with two controls:
+
+- **Import Sauer lightmaps** — toggle the rewire on/off; off matches the stock Blender behaviour
+  (lightmap stays plugged into Principled BSDF emissive).
+- **Lightmap source** —
+  - *Auto (HDR if available)* — hot-swap each PNG for its `.hdr` sidecar when one is present (default; best for Cycles linear-light fidelity).
+  - *HDR only (.hdr)* — force the Radiance HDR sidecar; warn to console if missing.
+  - *LDR only (.png)* — keep the tonemapped PNG (cheaper in viewport).
+
+The addon flips the lightmap image's colorspace to **Non-Color** in all modes (it represents light, not
+albedo). TEXCOORD_1 from the glTF lands as `UVMap.001` in Blender automatically — the addon doesn't touch it.
+
+Note on texture paths: diffuse/normal/glow URIs in the `.gltf` are written as **absolute on-disk paths**
+(resolved via Sauer's `findfile()` + `realpath()`), so the importer finds them regardless of where the
+`.gltf` was written — you don't have to move it next to `packages/`. The `.bin` and lightmap PNG/HDR
+sidecars stay relative since they're emitted right next to the `.gltf`.
 
 ## Building
 
