@@ -1230,7 +1230,7 @@ void gltf_emit_mapmodel(gltf &g, stream *b, int &binsize, const extentity &ent, 
             Texture *tex = p->skins.inrange(j) && p->skins[j].tex ? p->skins[j].tex : notexture;
             gltf::material mat;
             mat.doubleSided = p->skins.inrange(j) ? !p->skins[j].cullface : false;
-            mat.alphaMode = gltf::material::MASK;
+            mat.alphaMode = gltf::material::ALPHA_MASK;
             copystring(mat.name, tex && tex->name ? tex->name : "mapmodel_mat");
 
             gltf::texture gtex;
