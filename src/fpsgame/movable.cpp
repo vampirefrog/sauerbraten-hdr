@@ -368,11 +368,27 @@ namespace game
     void updatemovables(int curtime)
     {
         if(!curtime) return;
-        if(!ismovableauthority()) return;
+        const bool isauth = ismovableauthority();
         loopv(movables)
         {
             movable *m = movables[i];
             if(m->state!=CS_ALIVE) continue;
+
+            // The barrel exploding timer ticks on every client, NOT only on the position
+            // authority. damaged() sets m->exploding when a GUN_BARREL splash kills the
+            // barrel (chain reactions), and only the shooter (the per-event damage
+            // authority) sees that damage applied. If the timer were gated on the position
+            // authority, the timer would never fire anywhere -- the position authority
+            // wouldn't have the exploding flag set, and the shooter wouldn't get to its
+            // updatemovables branch. Letting the arm run unconditionally means whichever
+            // client set the timer is the one that broadcasts the cascade explosion.
+            if(m->exploding && lastmillis >= m->exploding)
+            {
+                m->explode(m);
+                adddecal(DECAL_SCORCH, m->o, vec(0, 0, 1), guns[GUN_BARREL].exprad/2);
+                continue;
+            }
+            if(!isauth) continue;
             if(m->etype==PLATFORM || m->etype==ELEVATOR)
             {
                 if(m->vel.iszero()) continue;
@@ -391,11 +407,6 @@ namespace game
                         sendsinglemovablestate(i);
                     }
                 }
-            }
-            else if(m->exploding && lastmillis >= m->exploding)
-            {
-                m->explode(m);
-                adddecal(DECAL_SCORCH, m->o, vec(0, 0, 1), guns[GUN_BARREL].exprad/2);
             }
             else if(m->maymove() || (m->stacked && (m->stacked->state!=CS_ALIVE || m->stackpos != m->stacked->o)))
             {
