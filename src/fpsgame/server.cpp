@@ -2797,10 +2797,13 @@ namespace server
         if(idx < 0 || idx >= MAXENTS) return;
         if(!servertriggers.inrange(idx)) return;
         if(servertriggers[idx].state == newstate) return;
+        int oldstate = servertriggers[idx].state;
         servertriggers[idx].state = newstate;
         servertriggers[idx].lasttrigger = gamemillis;
         while(triggerstates.length() <= idx) triggerstates.add(TRIGGER_RESET);
         triggerstates[idx] = newstate;
+        const entity &e = ments[idx];
+        logoutf("trigger ent#%d (attr3=%d tag=%d) %d -> %d", idx, e.attr3, e.attr4, oldstate, newstate);
         sendf(-1, 1, "ri3", N_TRIGGER, idx, newstate);
     }
 
