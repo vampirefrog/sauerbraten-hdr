@@ -81,13 +81,11 @@ static void fixent(entity &e, int version)
     if(version <= 31 && e.type == ET_MAPMODEL) { int yaw = (int(e.attr1)%360 + 360)%360 + 7; e.attr1 = yaw - yaw%15; }
 }
 
-bool loadents(const char *fname, vector<entity> &ents, uint *crc)
+// Body of loadents -- takes an already-opened stream so the dedicated server can also feed it
+// the persisted .ogz file at a non-standard path (the persistence layer stores it as
+// "<homedir>/map.ogz", not "packages/<name>.ogz"). ogzname is used only for diagnostics.
+static bool loadentsfromstream(stream *f, const char *ogzname, vector<entity> &ents, uint *crc)
 {
-    string pakname, mapname, mcfgname, ogzname;
-    getmapfilenames(fname, NULL, pakname, mapname, mcfgname);
-    formatstring(ogzname, "packages/%s.ogz", mapname);
-    path(ogzname);
-    stream *f = opengzfile(ogzname, "rb");
     if(!f) return false;
     octaheader hdr;
     if(f->read(&hdr, 7*sizeof(int)) != 7*sizeof(int)) { conoutf(CON_ERROR, "map %s has malformatted header", ogzname); delete f; return false; }
@@ -187,10 +185,28 @@ bool loadents(const char *fname, vector<entity> &ents, uint *crc)
         f->seek(0, SEEK_END);
         *crc = f->getcrc();
     }
-    
+
     delete f;
 
     return true;
+}
+
+bool loadents(const char *fname, vector<entity> &ents, uint *crc)
+{
+    string pakname, mapname, mcfgname, ogzname;
+    getmapfilenames(fname, NULL, pakname, mapname, mcfgname);
+    formatstring(ogzname, "packages/%s.ogz", mapname);
+    path(ogzname);
+    stream *f = opengzfile(ogzname, "rb");
+    return loadentsfromstream(f, ogzname, ents, crc);
+}
+
+// Load entities from a literal .ogz path -- used by the dedicated server's persistence layer,
+// which stores the map at a fixed home-dir filename ("map.ogz") rather than under packages/.
+bool loadentsfrompath(const char *path, vector<entity> &ents, uint *crc)
+{
+    stream *f = opengzfile(path, "rb");
+    return loadentsfromstream(f, path, ents, crc);
 }
 
 // The dedicated server needs load_world/save_world (it keeps a real map), so this region

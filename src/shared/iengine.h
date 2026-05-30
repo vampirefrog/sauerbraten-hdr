@@ -376,6 +376,7 @@ extern void getmapfilenames(const char *fname, const char *cname, char *pakname,
 extern uint getmapcrc();
 extern void clearmapcrc();
 extern bool loadents(const char *fname, vector<entity> &ents, uint *crc = NULL);
+extern bool loadentsfrompath(const char *path, vector<entity> &ents, uint *crc = NULL);
 
 // physics
 extern vec collidewall;

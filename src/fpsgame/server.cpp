@@ -2305,7 +2305,18 @@ namespace server
         // m_edit doesn't spawn items, but we still want triggers from the persistent map (if any)
         // so the server can drive door animations in coop edit. ments stays empty if loadents
         // can't find the map -- the legacy N_TRIGGER relay handles those cases.
+        // loadents looks under packages/<name>.ogz. The persistence layer stores the .ogz at a
+        // fixed home-dir path (servermappath, default "map.ogz") and the canonical name in a
+        // sidecar; if the named-path read fails but the persisted file holds the same map name,
+        // read entities directly from that file.
         bool gotents = loadents(smapname, ments, &mcrc);
+        if(!gotents && servermappath[0] && mapdataname[0] && !strcmp(smapname, mapdataname))
+        {
+            ments.setsize(0);
+            mcrc = 0;
+            gotents = loadentsfrompath(servermappath, ments, &mcrc);
+            if(gotents) logoutf("loaditems(%s): fell back to persisted .ogz at %s", smapname, servermappath);
+        }
         int respawnents = 0, triggers = 0;
         if(gotents) loopv(ments)
         {
