@@ -2306,6 +2306,14 @@ namespace server
         // so the server can drive door animations in coop edit. ments stays empty if loadents
         // can't find the map -- the legacy N_TRIGGER relay handles those cases.
         bool gotents = loadents(smapname, ments, &mcrc);
+        int respawnents = 0, triggers = 0;
+        if(gotents) loopv(ments)
+        {
+            if(ments[i].type == RESPAWNPOINT) respawnents++;
+            else if(ments[i].type == ET_MAPMODEL && entities::validtriggertype(ments[i].attr3)) triggers++;
+        }
+        logoutf("loaditems(%s): loadents=%s ments=%d respawnpoints=%d triggers=%d",
+                smapname, gotents ? "ok" : "FAILED", ments.length(), respawnents, triggers);
         initservertriggers();
         if(m_edit || !gotents) return;
         loopv(ments) if(canspawnitem(ments[i].type))
@@ -2838,7 +2846,9 @@ namespace server
             {
                 clientinfo *ci = alive[j];
                 if(ci->state.respawnent == i) continue;
-                if(e.o.dist(serverfeet(ci)) >= 12.0f) continue;
+                float d = e.o.dist(serverfeet(ci));
+                if(d >= 12.0f) continue;
+                logoutf("respawnpoint pickup: cn%d ent#%d dist=%.2f", ci->clientnum, i, d);
                 ci->state.respawnent = i;
                 sendf(ci->clientnum, 1, "ri2", N_RESPAWNENT, i);
             }
