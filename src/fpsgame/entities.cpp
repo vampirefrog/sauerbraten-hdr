@@ -521,12 +521,16 @@ namespace entities
         if(broadcast) sendtriggerpacket(idx, newstate);
     }
 
-    // SP-only proximity + state-machine path. In MP the server owns trigger transitions and
-    // broadcasts N_TRIGGER for every change -- see server.cpp::tickservertriggers. The client
-    // still receives N_TRIGGER and runs settriggerstate(idx, state, false) to update visuals.
+    // Client-side proximity detection. The local player has perfect knowledge of both its own
+    // position and the entity layout, so we run the state-machine's proximity branches here in
+    // every mode -- a touch transition is sent to the server (via sendtriggerpacket), which then
+    // applies state to all clients and drives the 1000ms timer + cascade unlock.
+    //
+    // In MP we skip the local TRIGGERING/TRIGGER_RESETTING timer branch -- the server owns that,
+    // and a local timer would race with the server-driven N_TRIGGER broadcast. In SP it still
+    // runs so single-player progression works without a connected server.
     void checktriggers()
     {
-        if(m_mp(gamemode)) return;
         if(player1->state != CS_ALIVE) return;
         vec o = player1->feetpos();
         loopv(ents)
@@ -537,6 +541,7 @@ namespace entities
             {
                 case TRIGGERING:
                 case TRIGGER_RESETTING:
+                    if(m_mp(gamemode)) break;   // server owns the timer + cascade in MP
                     if(lastmillis-e.lasttrigger>=1000)
                     {
                         if(e.attr4)

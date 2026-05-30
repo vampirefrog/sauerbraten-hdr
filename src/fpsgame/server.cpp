@@ -2823,37 +2823,16 @@ namespace server
         }
     }
 
-    // ci->state.o is the eye-level position the client streams via N_POS; entities::checktriggers
-    // uses feetpos() which is eye minus eyeheight. For ordinary players eyeheight is 14, set in
-    // dynent's ctor and never overridden -- subtract it here so server checks match the client
-    // thresholds exactly.
-    static inline vec serverfeet(const clientinfo *ci)
-    {
-        vec f = ci->state.o;
-        f.z -= 14.0f;
-        return f;
-    }
-
-    // Mirror of entities::checktriggers, but driven off every connected client's authoritative
-    // position. Runs in m_mp modes only (SP keeps the engine-local path, since the local server
-    // can't see the offline player). curtime gates: we only tick when the server has advanced
-    // time, otherwise rapid-fire transitions could happen during gamepaused / between frames.
+    // Server-side timer for triggers that are mid-animation. Clients run their own proximity
+    // check and send N_TRIGGER on the touch transition (RESET->TRIGGERING and
+    // TRIGGERED->TRIGGER_RESETTING) -- the server applies that, then drives the 1000ms timer
+    // here so all clients see the next-state transition (and any cascade unlock of LOCKED
+    // entities with matching tag) at the same moment.
     void tickservertriggers()
     {
         if(m_demo || interm || gamepaused) return;
         if(!m_mp(gamemode)) return;
         if(ments.empty() || servertriggers.empty()) return;
-        // Static buffer to avoid per-frame allocation.
-        static vector<clientinfo *> alive;
-        alive.setsize(0);
-        loopv(clients)
-        {
-            clientinfo *ci = clients[i];
-            if(!ci || ci->state.aitype != AI_NONE) continue;
-            if(ci->state.state != CS_ALIVE) continue;
-            alive.add(ci);
-        }
-        const float prad = 4.1f; // default fpsent radius -- server has no per-client radius
         loopv(ments)
         {
             const entity &e = ments[i];
@@ -2861,63 +2840,19 @@ namespace server
             if(!entities::validtriggertype(e.attr3)) continue;
             if(!servertriggers.inrange(i)) continue;
             servertrigger &t = servertriggers[i];
+            if(t.state != TRIGGERING && t.state != TRIGGER_RESETTING) continue;
+            if(gamemillis - t.lasttrigger < 1000) continue;
             int flags = entities::triggertypeflags(e.attr3);
-            float radius = (flags & entities::TRIG_COLLIDE) ? 20.0f : 12.0f;
-            float closest = 1e9f;
-            loopvj(alive) closest = min(closest, e.o.dist(serverfeet(alive[j])) - prad);
-            switch(t.state)
+            if(e.attr4)
             {
-                case TRIGGERING:
-                case TRIGGER_RESETTING:
-                    if(gamemillis - t.lasttrigger >= 1000)
-                    {
-                        if(e.attr4)
-                        {
-                            if(t.state == TRIGGERING) serverunlock(e.attr4, TRIGGER_RESET, TRIGGERING);
-                            else serverunlock(e.attr4, TRIGGERED, TRIGGER_RESETTING);
-                        }
-                        int next;
-                        if(flags & entities::TRIG_DISAPPEAR) next = TRIGGER_DISAPPEARED;
-                        else if(t.state == TRIGGERING && (flags & entities::TRIG_TOGGLE)) next = TRIGGERED;
-                        else next = TRIGGER_RESET;
-                        setservertriggerstate(i, next);
-                    }
-                    break;
-                case TRIGGER_RESET:
-                    if(t.lasttrigger)
-                    {
-                        if((flags & (entities::TRIG_AUTO_RESET|entities::TRIG_MANY|entities::TRIG_LOCKED)) && closest >= radius) t.lasttrigger = 0;
-                        break;
-                    }
-                    else if(closest >= radius) break;
-                    else if(flags & entities::TRIG_LOCKED)
-                    {
-                        if(!e.attr4) break;
-                        // No "denied" cubescript hook on the server -- just rate-limit re-checks
-                        // so a player camping the locked trigger doesn't poll every tick.
-                        t.lasttrigger = gamemillis;
-                        break;
-                    }
-                    setservertriggerstate(i, TRIGGERING);
-                    break;
-                case TRIGGERED:
-                    if(closest < radius)
-                    {
-                        if(t.lasttrigger) break;
-                    }
-                    else if(flags & entities::TRIG_AUTO_RESET)
-                    {
-                        if(gamemillis - t.lasttrigger < 6000) break;
-                    }
-                    else if(flags & entities::TRIG_MANY)
-                    {
-                        t.lasttrigger = 0;
-                        break;
-                    }
-                    else break;
-                    setservertriggerstate(i, TRIGGER_RESETTING);
-                    break;
+                if(t.state == TRIGGERING) serverunlock(e.attr4, TRIGGER_RESET, TRIGGERING);
+                else serverunlock(e.attr4, TRIGGERED, TRIGGER_RESETTING);
             }
+            int next;
+            if(flags & entities::TRIG_DISAPPEAR) next = TRIGGER_DISAPPEARED;
+            else if(t.state == TRIGGERING && (flags & entities::TRIG_TOGGLE)) next = TRIGGERED;
+            else next = TRIGGER_RESET;
+            setservertriggerstate(i, next);
         }
     }
 
