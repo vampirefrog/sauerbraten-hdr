@@ -1,4 +1,5 @@
 #include "game.h"
+#include "triggers.h"
 
 namespace game
 {
@@ -770,10 +771,15 @@ namespace server
          sendf(-1, 1, "ris", N_SERVMSG, s);
     }
 
-    // Coop trigger state cache. triggerstates[entidx] holds the most-recent state we've heard
-    // any client report via N_TRIGGER. We never run the door state machine ourselves -- this is
-    // a pure relay-plus-replay so late joiners enter a coop game with the doors in the same
-    // state everyone else sees. Cleared on map change alongside items.
+    // Server-side trigger state machine. servertriggers[entidx] is the authoritative state +
+    // last-transition timestamp for every ET_MAPMODEL with a valid trigger type. The server
+    // drives proximity entry/exit, the 1000ms cascade, and the 6000ms auto-reset off these
+    // records and broadcasts every transition as N_TRIGGER, so all clients render identical door
+    // animations. triggerstates is kept in sync as the wire-format cache the welcome packet
+    // replays to late joiners (state only -- elapsed time is lost, the joiner sees the door at
+    // its end-of-animation pose).
+    struct servertrigger { int state, lasttrigger; };
+    vector<servertrigger> servertriggers;
     vector<int> triggerstates;
 
     void resetitems()
@@ -782,6 +788,7 @@ namespace server
         ments.setsize(0);
         sents.setsize(0);
         triggerstates.setsize(0);
+        servertriggers.setsize(0);
         //cps.reset();
     }
 
@@ -2268,12 +2275,26 @@ namespace server
         sendpacket(-1, 1, p.finalize(), ci->clientnum);
     }
 
+    void initservertriggers()
+    {
+        servertriggers.setsize(0);
+        loopv(ments)
+        {
+            servertrigger t = { TRIGGER_RESET, 0 };
+            servertriggers.add(t);
+        }
+    }
+
     void loaditems()
     {
         resetitems();
         notgotitems = true;
-        if(m_edit || !loadents(smapname, ments, &mcrc))
-            return;
+        // m_edit doesn't spawn items, but we still want triggers from the persistent map (if any)
+        // so the server can drive door animations in coop edit. ments stays empty if loadents
+        // can't find the map -- the legacy N_TRIGGER relay handles those cases.
+        bool gotents = loadents(smapname, ments, &mcrc);
+        initservertriggers();
+        if(m_edit || !gotents) return;
         loopv(ments) if(canspawnitem(ments[i].type))
         {
             server_entity se = { NOTUSED, 0, false };
@@ -2743,6 +2764,127 @@ namespace server
         ci->timesync = false;
     }
 
+    // Authoritative state setter. Updates the per-entity record (state + lasttrigger), keeps
+    // the legacy triggerstates cache in sync for welcome-packet replay, and broadcasts the new
+    // state to every client so they re-run the local visual/audio side via settriggerstate.
+    void setservertriggerstate(int idx, int newstate)
+    {
+        if(idx < 0 || idx >= MAXENTS) return;
+        if(!servertriggers.inrange(idx)) return;
+        if(servertriggers[idx].state == newstate) return;
+        servertriggers[idx].state = newstate;
+        servertriggers[idx].lasttrigger = gamemillis;
+        while(triggerstates.length() <= idx) triggerstates.add(TRIGGER_RESET);
+        triggerstates[idx] = newstate;
+        sendf(-1, 1, "ri3", N_TRIGGER, idx, newstate);
+    }
+
+    // Cascade unlock across all triggers with a matching tag -- the server runs this in place
+    // of the client's entities::unlocktriggers when the 1000ms timer on a tag-bearing trigger
+    // expires. We can't do the original overlapsdynent collide-vs-passenger check because the
+    // server has no dynamic-collider model; we approximate by not closing a door if any alive
+    // player is within the collide radius, handled by the TRIGGERED-state proximity test.
+    void serverunlock(int tag, int oldstate, int newstate)
+    {
+        loopv(ments)
+        {
+            const entity &e = ments[i];
+            if(e.type != ET_MAPMODEL) continue;
+            if(!entities::validtriggertype(e.attr3)) continue;
+            if(e.attr4 != tag) continue;
+            if(!(entities::triggertypeflags(e.attr3) & entities::TRIG_LOCKED)) continue;
+            if(!servertriggers.inrange(i) || servertriggers[i].state != oldstate) continue;
+            setservertriggerstate(i, newstate);
+        }
+    }
+
+    // Mirror of entities::checktriggers, but driven off every connected client's authoritative
+    // position. Runs in m_mp modes only (SP keeps the engine-local path, since the local server
+    // can't see the offline player). curtime gates: we only tick when the server has advanced
+    // time, otherwise rapid-fire transitions could happen during gamepaused / between frames.
+    void tickservertriggers()
+    {
+        if(m_demo || interm || gamepaused) return;
+        if(!m_mp(gamemode)) return;
+        if(ments.empty() || servertriggers.empty()) return;
+        // Static buffer to avoid per-frame allocation.
+        static vector<vec> playerpos;
+        playerpos.setsize(0);
+        loopv(clients)
+        {
+            clientinfo *ci = clients[i];
+            if(!ci || ci->state.aitype != AI_NONE) continue;
+            if(ci->state.state != CS_ALIVE) continue;
+            playerpos.add(ci->state.o);
+        }
+        const float prad = 4.1f; // default fpsent radius -- server has no per-client radius
+        loopv(ments)
+        {
+            const entity &e = ments[i];
+            if(e.type != ET_MAPMODEL) continue;
+            if(!entities::validtriggertype(e.attr3)) continue;
+            if(!servertriggers.inrange(i)) continue;
+            servertrigger &t = servertriggers[i];
+            int flags = entities::triggertypeflags(e.attr3);
+            float radius = (flags & entities::TRIG_COLLIDE) ? 20.0f : 12.0f;
+            float closest = 1e9f;
+            loopvj(playerpos) closest = min(closest, e.o.dist(playerpos[j]) - prad);
+            switch(t.state)
+            {
+                case TRIGGERING:
+                case TRIGGER_RESETTING:
+                    if(gamemillis - t.lasttrigger >= 1000)
+                    {
+                        if(e.attr4)
+                        {
+                            if(t.state == TRIGGERING) serverunlock(e.attr4, TRIGGER_RESET, TRIGGERING);
+                            else serverunlock(e.attr4, TRIGGERED, TRIGGER_RESETTING);
+                        }
+                        int next;
+                        if(flags & entities::TRIG_DISAPPEAR) next = TRIGGER_DISAPPEARED;
+                        else if(t.state == TRIGGERING && (flags & entities::TRIG_TOGGLE)) next = TRIGGERED;
+                        else next = TRIGGER_RESET;
+                        setservertriggerstate(i, next);
+                    }
+                    break;
+                case TRIGGER_RESET:
+                    if(t.lasttrigger)
+                    {
+                        if((flags & (entities::TRIG_AUTO_RESET|entities::TRIG_MANY|entities::TRIG_LOCKED)) && closest >= radius) t.lasttrigger = 0;
+                        break;
+                    }
+                    else if(closest >= radius) break;
+                    else if(flags & entities::TRIG_LOCKED)
+                    {
+                        if(!e.attr4) break;
+                        // No "denied" cubescript hook on the server -- just rate-limit re-checks
+                        // so a player camping the locked trigger doesn't poll every tick.
+                        t.lasttrigger = gamemillis;
+                        break;
+                    }
+                    setservertriggerstate(i, TRIGGERING);
+                    break;
+                case TRIGGERED:
+                    if(closest < radius)
+                    {
+                        if(t.lasttrigger) break;
+                    }
+                    else if(flags & entities::TRIG_AUTO_RESET)
+                    {
+                        if(gamemillis - t.lasttrigger < 6000) break;
+                    }
+                    else if(flags & entities::TRIG_MANY)
+                    {
+                        t.lasttrigger = 0;
+                        break;
+                    }
+                    else break;
+                    setservertriggerstate(i, TRIGGER_RESETTING);
+                    break;
+            }
+        }
+    }
+
     void serverupdate()
     {
         if(shouldstep && !gamepaused)
@@ -2770,6 +2912,7 @@ namespace server
                             sendf(-1, 1, "ri2", N_ANNOUNCE, sents[i].type);
                         }
                     }
+                    tickservertriggers();
                 }
                 aiman::checkai();
                 if(smode) smode->update();
@@ -3410,16 +3553,22 @@ namespace server
 
             case N_TRIGGER:
             {
-                // Coop trigger sync. We don't run the state machine here -- the server is just a
-                // relay + a persistent cache so late joiners get the current door states. We
-                // store every non-RESET state we see; sendwelcome() replays them to joiners.
-                // Channel 1 matches N_ITEMSPAWN / the welcome packet, so the client handles all
-                // trigger traffic in one place.
+                // Inbound N_TRIGGER is now a "force this state" request, used by the client's
+                // cubescript `/trigger tag state` command (unlocktriggers walks matching entities
+                // and emits one N_TRIGGER each). The server adopts the requested state into its
+                // authoritative record and broadcasts to all clients via setservertriggerstate.
+                // For entity indices the server doesn't track (e.g. coop-edit additions the
+                // server hasn't picked up), fall back to the legacy relay so the request still
+                // reaches the other clients.
                 int idx = getint(p), state = getint(p);
                 if(idx < 0 || idx >= MAXENTS) break;
-                while(triggerstates.length() <= idx) triggerstates.add(TRIGGER_RESET);
-                triggerstates[idx] = state;
-                sendf(-1, 1, "ri3x", N_TRIGGER, idx, state, sender);
+                if(servertriggers.inrange(idx)) setservertriggerstate(idx, state);
+                else
+                {
+                    while(triggerstates.length() <= idx) triggerstates.add(TRIGGER_RESET);
+                    triggerstates[idx] = state;
+                    sendf(-1, 1, "ri3x", N_TRIGGER, idx, state, sender);
+                }
                 break;
             }
                 

@@ -1,4 +1,5 @@
 #include "game.h"
+#include "triggers.h"
 
 namespace entities
 {
@@ -393,59 +394,8 @@ namespace entities
         while(ents.length()) deleteentity(ents.pop());
     }
 
-    enum
-    {
-        TRIG_COLLIDE    = 1<<0,
-        TRIG_TOGGLE     = 1<<1,
-        TRIG_ONCE       = 0<<2,
-        TRIG_MANY       = 1<<2,
-        TRIG_DISAPPEAR  = 1<<3,
-        TRIG_AUTO_RESET = 1<<4,
-        TRIG_RUMBLE     = 1<<5,
-        TRIG_LOCKED     = 1<<6,
-        TRIG_ENDSP      = 1<<7
-    };
-
-    static const int NUMTRIGGERTYPES = 32;
-
-    static const int triggertypes[NUMTRIGGERTYPES] =
-    {
-        -1,
-        TRIG_ONCE,                    // 1
-        TRIG_RUMBLE,                  // 2
-        TRIG_TOGGLE,                  // 3
-        TRIG_TOGGLE | TRIG_RUMBLE,    // 4
-        TRIG_MANY,                    // 5
-        TRIG_MANY | TRIG_RUMBLE,      // 6
-        TRIG_MANY | TRIG_TOGGLE,      // 7
-        TRIG_MANY | TRIG_TOGGLE | TRIG_RUMBLE,    // 8
-        TRIG_COLLIDE | TRIG_TOGGLE | TRIG_RUMBLE, // 9
-        TRIG_COLLIDE | TRIG_TOGGLE | TRIG_AUTO_RESET | TRIG_RUMBLE, // 10
-        TRIG_COLLIDE | TRIG_TOGGLE | TRIG_LOCKED | TRIG_RUMBLE,     // 11
-        TRIG_DISAPPEAR,               // 12
-        TRIG_DISAPPEAR | TRIG_RUMBLE, // 13
-        TRIG_DISAPPEAR | TRIG_COLLIDE | TRIG_LOCKED, // 14
-        -1 /* reserved 15 */,
-        -1 /* reserved 16 */,
-        -1 /* reserved 17 */,
-        -1 /* reserved 18 */,
-        -1 /* reserved 19 */,
-        -1 /* reserved 20 */,
-        -1 /* reserved 21 */,
-        -1 /* reserved 22 */,
-        -1 /* reserved 23 */,
-        -1 /* reserved 24 */,
-        -1 /* reserved 25 */,
-        -1 /* reserved 26 */,
-        -1 /* reserved 27 */,
-        -1 /* reserved 28 */,
-        TRIG_DISAPPEAR | TRIG_RUMBLE | TRIG_ENDSP, // 29
-        -1 /* reserved 30 */,
-        -1 /* reserved 31 */,
-    };
-
-    #define validtrigger(type) (triggertypes[(type) & (NUMTRIGGERTYPES-1)]>=0)
-    #define checktriggertype(type, flag) (triggertypes[(type) & (NUMTRIGGERTYPES-1)] & (flag))
+    #define validtrigger(type) entities::validtriggertype(type)
+    #define checktriggertype(type, flag) (entities::triggertypeflags(type) & (flag))
 
     static inline void cleartriggerflags(extentity &e)
     {
@@ -567,17 +517,12 @@ namespace entities
         if(broadcast) sendtriggerpacket(idx, newstate);
     }
 
-    // Drives the trigger state machine off the LOCAL player's position only. Only the proximity-
-    // initiated transitions (RESET->TRIGGERING and TRIGGERED->TRIGGER_RESETTING) broadcast; the
-    // 1000ms-timer cascades fire identically on every client (each ticks off its own lasttrigger,
-    // which was set when the proximity broadcast arrived) so they converge without a packet.
-    //
-    // Limitation: in MP a door closes when the player who opened it walks away, even if a
-    // teammate is still under it. To support "stays open while ANY player is inside" we'd need to
-    // poll other players' positions, which Sauer broadcasts unreliably -- not worth the drift for
-    // Phase 1.
+    // SP-only proximity + state-machine path. In MP the server owns trigger transitions and
+    // broadcasts N_TRIGGER for every change -- see server.cpp::tickservertriggers. The client
+    // still receives N_TRIGGER and runs settriggerstate(idx, state, false) to update visuals.
     void checktriggers()
     {
+        if(m_mp(gamemode)) return;
         if(player1->state != CS_ALIVE) return;
         vec o = player1->feetpos();
         loopv(ents)
