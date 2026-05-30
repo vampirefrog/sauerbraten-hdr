@@ -2811,14 +2811,25 @@ namespace server
         }
     }
 
+    // ci->state.o is the eye-level position the client streams via N_POS; the engine-side
+    // proximity checks (entities::checkitems, entities::checktriggers) use feetpos() which is
+    // eye minus eyeheight. For ordinary players eyeheight is 14, set in dynent's ctor and never
+    // overridden -- subtract it here so server checks match the client thresholds exactly.
+    static inline vec serverfeet(const clientinfo *ci)
+    {
+        vec f = ci->state.o;
+        f.z -= 14.0f;
+        return f;
+    }
+
     // Server-side RESPAWNPOINT pickup: when an alive client walks within 12 units of a
-    // RESPAWNPOINT entity, record the index in gamestate.respawnent and send N_RESPAWNENT so
-    // the client plays the pickup sound + stores the same index locally for its own UI. The
-    // server then uses ci->state.respawnent in sendspawn to drive findplayerspawn.
+    // RESPAWNPOINT entity (raw feet-to-entity distance, matching entities::checkitems), record
+    // the index in gamestate.respawnent and send N_RESPAWNENT so the client plays the pickup
+    // sound + stores the same index locally for its own UI. The server then uses
+    // ci->state.respawnent in sendspawn to drive findplayerspawn.
     void tickrespawnpoints(vector<clientinfo *> &alive)
     {
         if(ments.empty() || alive.empty()) return;
-        const float prad = 4.1f;
         loopv(ments)
         {
             const entity &e = ments[i];
@@ -2827,7 +2838,7 @@ namespace server
             {
                 clientinfo *ci = alive[j];
                 if(ci->state.respawnent == i) continue;
-                if(e.o.dist(ci->state.o) - prad >= 12.0f) continue;
+                if(e.o.dist(serverfeet(ci)) >= 12.0f) continue;
                 ci->state.respawnent = i;
                 sendf(ci->clientnum, 1, "ri2", N_RESPAWNENT, i);
             }
@@ -2866,7 +2877,7 @@ namespace server
             int flags = entities::triggertypeflags(e.attr3);
             float radius = (flags & entities::TRIG_COLLIDE) ? 20.0f : 12.0f;
             float closest = 1e9f;
-            loopvj(alive) closest = min(closest, e.o.dist(alive[j]->state.o) - prad);
+            loopvj(alive) closest = min(closest, e.o.dist(serverfeet(alive[j])) - prad);
             switch(t.state)
             {
                 case TRIGGERING:
