@@ -304,7 +304,7 @@ namespace game
     {
         removetrackedparticles();
         removetrackeddynlights();
-        loopv(monsters) delete monsters[i];
+        loopv(monsters) delete monsters[i]; 
         cleardynentcache();
         monsters.shrink(0);
         numkilled = 0;
@@ -317,19 +317,14 @@ namespace game
             nextmonster = mtimestart = lastmillis+10000;
             monstertotal = spawnremain = skill*10;
         }
-        else
+        else if(m_classicsp)
         {
-            // Map-placed monsters from MONSTER entities. Was gated to m_classicsp; we now run
-            // this in every non-DMSP mode so coop on SP maps gets its monsters. PvP maps don't
-            // have MONSTER entities, so this loop is a no-op there. Each client iterates the
-            // entity list in identical order so the resulting `monsters` vector indices match
-            // across peers without any negotiation.
             mtimestart = lastmillis;
             loopv(entities::ents)
             {
                 extentity &e = *entities::ents[i];
                 if(e.type!=MONSTER) continue;
-                monster *m = new monster(e.attr2, e.attr1, e.attr3, M_SLEEP, 100, 0);
+                monster *m = new monster(e.attr2, e.attr1, e.attr3, M_SLEEP, 100, 0);  
                 monsters.add(m);
                 m->o = e.o;
                 entinmap(m);
@@ -337,10 +332,11 @@ namespace game
                 monstertotal++;
             }
         }
-        // Teleports: ungating too, same reasoning -- monsters that hit a teleport need it
-        // in MP modes the same as in SP.
         teleports.setsize(0);
-        loopv(entities::ents) if(entities::ents[i]->type==TELEPORT) teleports.add(i);
+        if(m_dmsp || m_classicsp)
+        {
+            loopv(entities::ents) if(entities::ents[i]->type==TELEPORT) teleports.add(i);
+        }
     }
 
     void endsp(bool allkilled)
@@ -360,102 +356,21 @@ namespace game
         if(remain>0 && remain<=5) conoutf(CON_GAMEINFO, "\f2only %d monster(s) remaining", remain);
     }
 
-    // Per-monster ownership policy. Returns the clientnum of the client that owns monster idx
-     // -- the one that ticks its AI + physics and broadcasts its position. Default policy is
-     // round-robin across all connected clientnums sorted ascending; with one player this is
-     // simply that player. Owner changes implicitly when someone joins/leaves because the
-     // round-robin recomputes against the current clients list each tick. Local hot-swap
-     // mid-action is fine: the new owner's first tick reads the monster's current state and
-     // continues from there.
-    static int monsterowner(int idx)
-    {
-        if(player1->clientnum < 0) return -1;       // not connected -> single-player; we own everything
-        static vector<int> nums;
-        nums.setsize(0);
-        nums.add(player1->clientnum);
-        loopv(clients) if(clients[i] && clients[i] != player1 && clients[i]->clientnum >= 0)
-            nums.add(clients[i]->clientnum);
-        if(nums.empty()) return -1;
-        nums.sort();
-        return nums[idx % nums.length()];
-    }
-
-    static inline bool ownsmonster(int idx)
-    {
-        int o = monsterowner(idx);
-        return o < 0 || o == player1->clientnum;    // -1 == single-player => we own everything
-    }
-
-    // -- Coop networking ---------------------------------------------------------------------
-    // 10Hz position broadcast, one packet per owned monster. Fixed-size message keeps the
-    // server relay trivial (sendf with the exclude-sender suffix). Unreliable channel 0
-    // because positions are continuous -- a lost packet is replaced within 100ms.
-    static int lastmonsterpossent = 0;
-    void broadcastmonsterpos()
-    {
-        if(player1->clientnum < 0) return;
-        if(lastmillis - lastmonsterpossent < 100) return;
-        lastmonsterpossent = lastmillis;
-        loopv(monsters)
-        {
-            if(monsters[i]->state != CS_ALIVE || !ownsmonster(i)) continue;
-            monster *m = monsters[i];
-            packetbuf p(32, 0);                     // unreliable; channel 0
-            putint(p, N_MONSTERPOS);
-            putint(p, i);
-            putint(p, int(m->o.x * DMF));
-            putint(p, int(m->o.y * DMF));
-            putint(p, int(m->o.z * DMF));
-            putint(p, int(m->yaw));
-            putint(p, int(m->pitch));
-            putint(p, m->monsterstate);
-            putint(p, m->move);
-            sendclientpacket(p.finalize(), 0);
-        }
-    }
-
-    // Receive side: snap our local monster to the owner's broadcast. Non-owners do no AI/
-    // physics, so the snap is the visual. (Smooth interpolation between snapshots is a
-    // separate phase on top of this.)
-    void parsemonsterpos(ucharbuf &p)
-    {
-        int idx = getint(p);
-        vec o;
-        o.x = getint(p) / DMF;
-        o.y = getint(p) / DMF;
-        o.z = getint(p) / DMF;
-        int yaw = getint(p), pitch = getint(p);
-        int mstate = getint(p);
-        int mv = getint(p);
-        if(!monsters.inrange(idx)) return;
-        monster *m = monsters[idx];
-        if(m->state != CS_ALIVE) return;
-        if(ownsmonster(idx)) return;                // it's ours; ignore the server's relay back
-        m->o = o; m->yaw = float(yaw); m->pitch = float(pitch);
-        m->monsterstate = mstate;
-        m->move = mv;
-        updatedynentcache(m);
-    }
-
     void updatemonsters(int curtime)
     {
-        // Random DMSP spawning only fires on the lowest-clientnum (which is owner of idx 0).
-        // We'll broadcast spawned monsters via N_MONSTERSPAWN in a later phase; for now the
-        // single-authority gate keeps the random-spawn rng from rolling on every client.
-        if(m_dmsp && spawnremain && lastmillis>nextmonster && ownsmonster(0))
+        if(m_dmsp && spawnremain && lastmillis>nextmonster)
         {
             if(spawnremain--==monstertotal) { conoutf(CON_GAMEINFO, "\f2The invasion has begun!"); playsound(S_V_FIGHT); }
             nextmonster = lastmillis+1000;
             spawnmonster();
         }
-
+        
         if(killsendsp && monstertotal && !spawnremain && numkilled==monstertotal) endsp(true);
-
+        
         bool monsterwashurt = monsterhurt;
-
+        
         loopv(monsters)
         {
-            if(!ownsmonster(i)) continue;       // someone else ticks this monster's AI + physics
             if(monsters[i]->state==CS_ALIVE) monsters[i]->monsteraction(curtime);
             else if(monsters[i]->state==CS_DEAD)
             {
@@ -467,7 +382,7 @@ namespace game
                 }
             }
         }
-
+        
         if(monsterwashurt) monsterhurt = false;
     }
 
@@ -487,117 +402,14 @@ namespace game
         }
     }
 
-    static fpsent *getclientorplayer(int cn)
-    {
-        if(cn == player1->clientnum) return player1;
-        return getclient(cn);
-    }
-
-    // Authority side: the monster's owner applies the actual HP drop. May kill, in which
-    // case we broadcast N_MONSTERDIED so peers stop ticking / rendering this monster.
-    static void applymonsterdamage(int idx, int damage, fpsent *attacker)
-    {
-        if(!monsters.inrange(idx)) return;
-        monster *m = monsters[idx];
-        if(m->state != CS_ALIVE) return;
-        int prevstate = m->state;
-        m->monsterpain(damage, attacker);     // existing path: HP, pain transition or kill
-        if(prevstate == CS_ALIVE && m->state == CS_DEAD && player1->clientnum >= 0)
-        {
-            packetbuf p(16, ENET_PACKET_FLAG_RELIABLE);
-            putint(p, N_MONSTERDIED);
-            putint(p, idx);
-            putint(p, attacker ? attacker->clientnum : -1);
-            sendclientpacket(p.finalize(), 1);
-        }
-    }
-
-    void parsemonsterhit(int idx, int damage, int attackercn)
-    {
-        if(!monsters.inrange(idx)) return;
-        monster *m = monsters[idx];
-        if(m->state != CS_ALIVE) return;
-        if(ownsmonster(idx))
-        {
-            // Owner: full pain handling (HP + state + animation + possible kill).
-            fpsent *attacker = getclientorplayer(attackercn);
-            if(!attacker) attacker = player1;
-            applymonsterdamage(idx, damage, attacker);
-        }
-        else
-        {
-            // Non-owner: just play the visual / audio so it feels like a hit landed.
-            damageeffect(damage, m);
-            playsound(monstertypes[m->mtype].painsound, &m->o);
-        }
-    }
-
-    void parsemonsterdied(int idx, int attackercn)
-    {
-        if(!monsters.inrange(idx)) return;
-        monster *m = monsters[idx];
-        if(m->state != CS_ALIVE) return;
-        // Mark dead; mimic the tail of monsterpain()'s death branch but skip the kill broadcast
-        // (we ARE the broadcast receivers). monsterkilled() updates everyone's local kill count.
-        m->state = CS_DEAD;
-        m->lastpain = lastmillis;
-        playsound(monstertypes[m->mtype].diesound, &m->o);
-        monsterkilled();
-        // gib effect uses health magnitude; we don't have it on receivers, use a constant.
-        gibeffect(50, m->vel, m);
-        defformatstring(id, "monster_dead_%d", m->tag);
-        execident(id);
-    }
-
     void suicidemonster(monster *m)
     {
-        // SP fallthrough: existing behaviour. In MP, if we don't own the monster we route the
-        // suicide through the same N_MONSTERHIT path so the owner applies it.
-        int idx = monsters.find(m);
-        if(idx >= 0 && !ownsmonster(idx) && player1->clientnum >= 0)
-        {
-            packetbuf p(16, ENET_PACKET_FLAG_RELIABLE);
-            putint(p, N_MONSTERHIT);
-            putint(p, idx);
-            putint(p, 400);
-            putint(p, player1->clientnum);
-            sendclientpacket(p.finalize(), 1);
-            return;
-        }
         m->monsterpain(400, player1);
     }
 
     void hitmonster(int damage, monster *m, fpsent *at, const vec &vel, int gun)
     {
-        // Per-event authority: only the shooter (at==player1) acts on a hit. Peers running
-        // their own hit() in response to N_SHOTFX just return -- the shooter will send
-        // N_MONSTERHIT, the owner will broadcast back any resulting state changes.
-        if(at != player1) return;
-        int idx = monsters.find(m);
-        if(idx < 0) return;
-        if(ownsmonster(idx))
-        {
-            // Shooter is also the owner: apply directly, no round-trip.
-            applymonsterdamage(idx, damage, at);
-        }
-        else if(player1->clientnum >= 0)
-        {
-            // Shooter feedback locally (so the hit feels instant); owner gets the
-            // authoritative N_MONSTERHIT and decides what actually happens to HP.
-            damageeffect(damage, m);
-            playsound(monstertypes[m->mtype].painsound, &m->o);
-            packetbuf p(16, ENET_PACKET_FLAG_RELIABLE);
-            putint(p, N_MONSTERHIT);
-            putint(p, idx);
-            putint(p, damage);
-            putint(p, at->clientnum);
-            sendclientpacket(p.finalize(), 1);
-        }
-        else
-        {
-            // Single-player / not connected -- original behaviour.
-            m->monsterpain(damage, at);
-        }
+        m->monsterpain(damage, at);
     }
 
     void spsummary(int accuracy)

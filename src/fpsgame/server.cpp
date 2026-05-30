@@ -3408,36 +3408,6 @@ namespace server
                 break;
             }
 
-            case N_MONSTERPOS:
-            {
-                // Coop monster sync: pure relay. We don't validate ownership server-side
-                // (the round-robin policy is computed identically on every client from the
-                // client list, so an honest sender's broadcast lines up with peers'
-                // ownsmonster(idx) checks). Unreliable channel 0, fixed-size message.
-                int idx = getint(p);
-                int px = getint(p), py = getint(p), pz = getint(p);
-                int yaw = getint(p), pitch = getint(p);
-                int mstate = getint(p), mv = getint(p);
-                sendf(-1, 0, "ri9x", N_MONSTERPOS, idx, px, py, pz, yaw, pitch, mstate, mv, sender);
-                break;
-            }
-
-            case N_MONSTERHIT:
-            {
-                // Shooter -> owner (and all peers for visual feedback). Reliable, channel 1.
-                int idx = getint(p), damage = getint(p), attackercn = getint(p);
-                sendf(-1, 1, "ri4x", N_MONSTERHIT, idx, damage, attackercn, sender);
-                break;
-            }
-
-            case N_MONSTERDIED:
-            {
-                // Owner -> all peers. Reliable, channel 1.
-                int idx = getint(p), attackercn = getint(p);
-                sendf(-1, 1, "ri3x", N_MONSTERDIED, idx, attackercn, sender);
-                break;
-            }
-
             case N_TRIGGER:
             {
                 // Coop trigger sync. We don't run the state machine here -- the server is just a
