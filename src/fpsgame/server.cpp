@@ -2312,8 +2312,9 @@ namespace server
             if(ments[i].type == RESPAWNPOINT) respawnents++;
             else if(ments[i].type == ET_MAPMODEL && entities::validtriggertype(ments[i].attr3)) triggers++;
         }
-        logoutf("loaditems(%s): loadents=%s ments=%d respawnpoints=%d triggers=%d",
-                smapname, gotents ? "ok" : "FAILED", ments.length(), respawnents, triggers);
+        logoutf("loaditems(%s): mode=%s(%d) m_mp=%d loadents=%s ments=%d respawnpoints=%d triggers=%d",
+                smapname, modename(gamemode, "?"), gamemode, m_mp(gamemode) ? 1 : 0,
+                gotents ? "ok" : "FAILED", ments.length(), respawnents, triggers);
         initservertriggers();
         if(m_edit || !gotents) return;
         loopv(ments) if(canspawnitem(ments[i].type))
@@ -2838,6 +2839,23 @@ namespace server
     void tickrespawnpoints(vector<clientinfo *> &alive)
     {
         if(ments.empty() || alive.empty()) return;
+        // 1Hz diag: closest respawnpoint distance for cn0 -- so we can see whether the player's
+        // server-side position is anywhere near the entities the server is iterating.
+        static int diagms = 0;
+        if(gamemillis - diagms >= 1000)
+        {
+            diagms = gamemillis;
+            clientinfo *ci = alive[0];
+            float best = 1e9f; int bestidx = -1;
+            vec feet = serverfeet(ci);
+            loopv(ments) if(ments[i].type == RESPAWNPOINT)
+            {
+                float d = ments[i].o.dist(feet);
+                if(d < best) { best = d; bestidx = i; }
+            }
+            if(bestidx >= 0) logoutf("respawn diag: cn%d eye=(%.1f,%.1f,%.1f) feet=(%.1f,%.1f,%.1f) closest ent#%d dist=%.2f",
+                ci->clientnum, ci->state.o.x, ci->state.o.y, ci->state.o.z, feet.x, feet.y, feet.z, bestidx, best);
+        }
         loopv(ments)
         {
             const entity &e = ments[i];
