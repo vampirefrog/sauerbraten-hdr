@@ -2318,6 +2318,13 @@ namespace server
             if(gotents) logoutf("loaditems(%s): fell back to persisted .ogz at %s", smapname, servermappath);
         }
         if(!gotents) logoutf("loaditems(%s): no entities on disk (loadents failed)", smapname);
+        else loopv(ments)
+        {
+            const entity &e = ments[i];
+            if(e.type == ET_MAPMODEL && entities::validtriggertype(e.attr3))
+                logoutf("  trigger ent#%d attr3=%d (flags=0x%x) tag=%d at (%.0f,%.0f,%.0f)",
+                        i, e.attr3, entities::triggertypeflags(e.attr3), e.attr4, e.o.x, e.o.y, e.o.z);
+        }
         initservertriggers();
         if(m_edit || !gotents) return;
         loopv(ments) if(canspawnitem(ments[i].type))
