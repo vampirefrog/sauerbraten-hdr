@@ -2863,6 +2863,26 @@ namespace server
             if(ci->state.state != CS_ALIVE) continue;
             alive.add(ci);
         }
+        // 1Hz diag: closest still-in-RESET trigger for cn0. Lets us see how close the player
+        // is actually getting to triggers they're trying to press.
+        static int trigdiagms = 0;
+        if(!alive.empty() && gamemillis - trigdiagms >= 1000)
+        {
+            trigdiagms = gamemillis;
+            clientinfo *ci = alive[0];
+            vec feet = serverfeet(ci);
+            float best = 1e9f; int bestidx = -1;
+            loopv(ments)
+            {
+                if(ments[i].type != ET_MAPMODEL) continue;
+                if(!entities::validtriggertype(ments[i].attr3)) continue;
+                if(!servertriggers.inrange(i) || servertriggers[i].state != TRIGGER_RESET) continue;
+                float d = ments[i].o.dist(feet);
+                if(d < best) { best = d; bestidx = i; }
+            }
+            if(bestidx >= 0) logoutf("trig diag: cn%d feet=(%.0f,%.0f,%.0f) closest RESET trigger ent#%d at (%.0f,%.0f,%.0f) dist=%.2f",
+                ci->clientnum, feet.x, feet.y, feet.z, bestidx, ments[bestidx].o.x, ments[bestidx].o.y, ments[bestidx].o.z, best);
+        }
         const float prad = 4.1f; // default fpsent radius -- server has no per-client radius
         loopv(ments)
         {
