@@ -325,7 +325,12 @@ namespace game
 
     void pickgamespawn(fpsent *d)
     {
-        int ent = m_classicsp && d == player1 && respawnent >= 0 ? respawnent : -1;
+        // respawnent is set by the server-authoritative N_RESPAWNENT message in MP modes and by
+        // the local RESPAWNPOINT pickup in SP. It's authoritative for player1 -- bots / remote
+        // players still use the random PLAYERSTART / cmode-driven team spawns. Competitive
+        // modes (cmode != NULL: CTF, capture, collect, etc.) ignore respawnent and use their
+        // own team-tag spawn groups.
+        int ent = d == player1 && respawnent >= 0 && !cmode ? respawnent : -1;
         int tag = cmode ? cmode->getspawngroup(d) : 0;
         findplayerspawn(d, ent, tag);
     }

@@ -137,8 +137,14 @@ namespace server
         int frags, flags, deaths, teamkills, shotdamage, damage, tokens;
         int lasttimeplayed, timeplayed;
         float effectiveness;
+        // Server-authoritative last-touched RESPAWNPOINT entity index for this client.
+        // -1 = none yet; spawning uses a random PLAYERSTART. Set by the server's tick when
+        // the client walks within pickup range of a RESPAWNPOINT in ments. Sent to the
+        // client as N_RESPAWNENT both on pickup (for the "respawn point set!" feedback) and
+        // again as part of N_TRYSPAWN handling so the client knows where to spawn next.
+        int respawnent;
 
-        gamestate() : state(CS_DEAD), editstate(CS_DEAD), lifesequence(0) {}
+        gamestate() : state(CS_DEAD), editstate(CS_DEAD), lifesequence(0), respawnent(-1) {}
 
         bool isalive(int gamemillis)
         {
@@ -162,6 +168,9 @@ namespace server
             frags = flags = deaths = teamkills = shotdamage = damage = tokens = 0;
 
             lastdeath = 0;
+            // The checkpoint is tied to the previous map's entity indices; clear it so the
+            // first spawn on the new map picks a random PLAYERSTART until a fresh pickup.
+            respawnent = -1;
 
             respawn();
         }
@@ -1845,7 +1854,7 @@ namespace server
         }
 
         uchar operator[](int msg) const { return msg >= 0 && msg < NUMMSG ? msgmask[msg] : 0; }
-    } msgfilter(-1, N_CONNECT, N_SERVINFO, N_INITCLIENT, N_WELCOME, N_MAPCHANGE, N_SERVMSG, N_DAMAGE, N_HITPUSH, N_SHOTFX, N_EXPLODEFX, N_DIED, N_SPAWNSTATE, N_FORCEDEATH, N_TEAMINFO, N_ITEMACC, N_ITEMSPAWN, N_TIMEUP, N_CDIS, N_CURRENTMASTER, N_PONG, N_RESUME, N_BASESCORE, N_BASEINFO, N_BASEREGEN, N_ANNOUNCE, N_SENDDEMOLIST, N_SENDDEMO, N_DEMOPLAYBACK, N_SENDMAP, N_DROPFLAG, N_SCOREFLAG, N_RETURNFLAG, N_RESETFLAG, N_INVISFLAG, N_CLIENT, N_AUTHCHAL, N_INITAI, N_EXPIRETOKENS, N_DROPTOKENS, N_STEALTOKENS, N_DEMOPACKET, -2, N_REMIP, N_NEWMAP, N_GETMAP, N_SENDMAP, N_CLIPBOARD, -3, N_EDITENT, N_EDITF, N_EDITT, N_EDITM, N_FLIP, N_COPY, N_PASTE, N_ROTATE, N_REPLACE, N_DELCUBE, N_EDITVAR, N_EDITVSLOT, N_EDITPATCH, N_UNDO, N_REDO, -4, N_POS, NUMMSG),
+    } msgfilter(-1, N_CONNECT, N_SERVINFO, N_INITCLIENT, N_WELCOME, N_MAPCHANGE, N_SERVMSG, N_DAMAGE, N_HITPUSH, N_SHOTFX, N_EXPLODEFX, N_DIED, N_SPAWNSTATE, N_FORCEDEATH, N_TEAMINFO, N_ITEMACC, N_ITEMSPAWN, N_TIMEUP, N_CDIS, N_CURRENTMASTER, N_PONG, N_RESUME, N_BASESCORE, N_BASEINFO, N_BASEREGEN, N_ANNOUNCE, N_SENDDEMOLIST, N_SENDDEMO, N_DEMOPLAYBACK, N_SENDMAP, N_DROPFLAG, N_SCOREFLAG, N_RETURNFLAG, N_RESETFLAG, N_INVISFLAG, N_CLIENT, N_AUTHCHAL, N_INITAI, N_EXPIRETOKENS, N_DROPTOKENS, N_STEALTOKENS, N_DEMOPACKET, N_RESPAWNENT, -2, N_REMIP, N_NEWMAP, N_GETMAP, N_SENDMAP, N_CLIPBOARD, -3, N_EDITENT, N_EDITF, N_EDITT, N_EDITM, N_FLIP, N_COPY, N_PASTE, N_ROTATE, N_REPLACE, N_DELCUBE, N_EDITVAR, N_EDITVSLOT, N_EDITPATCH, N_UNDO, N_REDO, -4, N_POS, NUMMSG),
       connectfilter(-1, N_CONNECT, -2, N_AUTHANS, -3, N_PING, NUMMSG);
 
     int checktype(int type, clientinfo *ci)
@@ -2067,6 +2076,10 @@ namespace server
     {
         gamestate &gs = ci->state;
         spawnstate(ci);
+        // Tell the client where to spawn before sending the spawn state. Always emit (even when
+        // respawnent < 0) so the client's stored value gets cleared between lives where the
+        // server wants a random PLAYERSTART -- the client treats negative as "pick at random".
+        sendf(ci->ownernum, 1, "ri2", N_RESPAWNENT, gs.respawnent);
         sendf(ci->ownernum, 1, "rii7v", N_SPAWNSTATE, ci->clientnum, gs.lifesequence,
             gs.health, gs.maxhealth,
             gs.armour, gs.armourtype,
@@ -2798,6 +2811,29 @@ namespace server
         }
     }
 
+    // Server-side RESPAWNPOINT pickup: when an alive client walks within 12 units of a
+    // RESPAWNPOINT entity, record the index in gamestate.respawnent and send N_RESPAWNENT so
+    // the client plays the pickup sound + stores the same index locally for its own UI. The
+    // server then uses ci->state.respawnent in sendspawn to drive findplayerspawn.
+    void tickrespawnpoints(vector<clientinfo *> &alive)
+    {
+        if(ments.empty() || alive.empty()) return;
+        const float prad = 4.1f;
+        loopv(ments)
+        {
+            const entity &e = ments[i];
+            if(e.type != RESPAWNPOINT) continue;
+            loopvj(alive)
+            {
+                clientinfo *ci = alive[j];
+                if(ci->state.respawnent == i) continue;
+                if(e.o.dist(ci->state.o) - prad >= 12.0f) continue;
+                ci->state.respawnent = i;
+                sendf(ci->clientnum, 1, "ri2", N_RESPAWNENT, i);
+            }
+        }
+    }
+
     // Mirror of entities::checktriggers, but driven off every connected client's authoritative
     // position. Runs in m_mp modes only (SP keeps the engine-local path, since the local server
     // can't see the offline player). curtime gates: we only tick when the server has advanced
@@ -2806,17 +2842,19 @@ namespace server
     {
         if(m_demo || interm || gamepaused) return;
         if(!m_mp(gamemode)) return;
-        if(ments.empty() || servertriggers.empty()) return;
+        if(ments.empty()) return;
         // Static buffer to avoid per-frame allocation.
-        static vector<vec> playerpos;
-        playerpos.setsize(0);
+        static vector<clientinfo *> alive;
+        alive.setsize(0);
         loopv(clients)
         {
             clientinfo *ci = clients[i];
             if(!ci || ci->state.aitype != AI_NONE) continue;
             if(ci->state.state != CS_ALIVE) continue;
-            playerpos.add(ci->state.o);
+            alive.add(ci);
         }
+        tickrespawnpoints(alive);
+        if(servertriggers.empty()) return;
         const float prad = 4.1f; // default fpsent radius -- server has no per-client radius
         loopv(ments)
         {
@@ -2828,7 +2866,7 @@ namespace server
             int flags = entities::triggertypeflags(e.attr3);
             float radius = (flags & entities::TRIG_COLLIDE) ? 20.0f : 12.0f;
             float closest = 1e9f;
-            loopvj(playerpos) closest = min(closest, e.o.dist(playerpos[j]) - prad);
+            loopvj(alive) closest = min(closest, e.o.dist(alive[j]->state.o) - prad);
             switch(t.state)
             {
                 case TRIGGERING:

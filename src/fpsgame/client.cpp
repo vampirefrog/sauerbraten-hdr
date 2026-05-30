@@ -1692,6 +1692,25 @@ namespace game
                 break;
             }
 
+            case N_RESPAWNENT:
+            {
+                // Server-authoritative pickup of a RESPAWNPOINT (Phase 2). Two sources:
+                //  - proximity pickup tick on the server: a fresh checkpoint while alive,
+                //    play the feedback sound + log line.
+                //  - the message that precedes N_SPAWNSTATE: tells us where to spawn next.
+                // We treat them the same -- stash the index in game::respawnent; spawnplayer
+                // / findplayerspawn pick it up. Negative means "no checkpoint, random spawn".
+                int idx = getint(p);
+                bool fresh = idx >= 0 && idx != respawnent;
+                respawnent = idx;
+                if(fresh && player1->state == CS_ALIVE)
+                {
+                    conoutf(CON_GAMEINFO, "\f2respawn point set!");
+                    playsound(S_V_RESPAWNPOINT);
+                }
+                break;
+            }
+
             case N_CLIPBOARD:
             {
                 int cn = getint(p), unpacklen = getint(p), packlen = getint(p);
