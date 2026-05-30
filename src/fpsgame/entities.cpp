@@ -309,10 +309,14 @@ namespace entities
             }
 
             case RESPAWNPOINT:
-                if(!m_classicsp || d!=player1 || n==respawnent) break;
+                // Per-client pickup -- bots and remote players don't track checkpoints. In MP
+                // we tell the server so it can mirror the choice in ci->state.respawnent and
+                // ship the index back to us before N_SPAWNSTATE; in SP we just stash it.
+                if(d != player1 || n == respawnent) break;
                 respawnent = n;
                 conoutf(CON_GAMEINFO, "\f2respawn point set!");
                 playsound(S_V_RESPAWNPOINT);
+                if(m_mp(gamemode)) addmsg(N_RESPAWNENT, "ri", n);
                 break;
 
             case JUMPPAD:

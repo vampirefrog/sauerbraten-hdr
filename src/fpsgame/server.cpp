@@ -1854,7 +1854,7 @@ namespace server
         }
 
         uchar operator[](int msg) const { return msg >= 0 && msg < NUMMSG ? msgmask[msg] : 0; }
-    } msgfilter(-1, N_CONNECT, N_SERVINFO, N_INITCLIENT, N_WELCOME, N_MAPCHANGE, N_SERVMSG, N_DAMAGE, N_HITPUSH, N_SHOTFX, N_EXPLODEFX, N_DIED, N_SPAWNSTATE, N_FORCEDEATH, N_TEAMINFO, N_ITEMACC, N_ITEMSPAWN, N_TIMEUP, N_CDIS, N_CURRENTMASTER, N_PONG, N_RESUME, N_BASESCORE, N_BASEINFO, N_BASEREGEN, N_ANNOUNCE, N_SENDDEMOLIST, N_SENDDEMO, N_DEMOPLAYBACK, N_SENDMAP, N_DROPFLAG, N_SCOREFLAG, N_RETURNFLAG, N_RESETFLAG, N_INVISFLAG, N_CLIENT, N_AUTHCHAL, N_INITAI, N_EXPIRETOKENS, N_DROPTOKENS, N_STEALTOKENS, N_DEMOPACKET, N_RESPAWNENT, -2, N_REMIP, N_NEWMAP, N_GETMAP, N_SENDMAP, N_CLIPBOARD, -3, N_EDITENT, N_EDITF, N_EDITT, N_EDITM, N_FLIP, N_COPY, N_PASTE, N_ROTATE, N_REPLACE, N_DELCUBE, N_EDITVAR, N_EDITVSLOT, N_EDITPATCH, N_UNDO, N_REDO, -4, N_POS, NUMMSG),
+    } msgfilter(-1, N_CONNECT, N_SERVINFO, N_INITCLIENT, N_WELCOME, N_MAPCHANGE, N_SERVMSG, N_DAMAGE, N_HITPUSH, N_SHOTFX, N_EXPLODEFX, N_DIED, N_SPAWNSTATE, N_FORCEDEATH, N_TEAMINFO, N_ITEMACC, N_ITEMSPAWN, N_TIMEUP, N_CDIS, N_CURRENTMASTER, N_PONG, N_RESUME, N_BASESCORE, N_BASEINFO, N_BASEREGEN, N_ANNOUNCE, N_SENDDEMOLIST, N_SENDDEMO, N_DEMOPLAYBACK, N_SENDMAP, N_DROPFLAG, N_SCOREFLAG, N_RETURNFLAG, N_RESETFLAG, N_INVISFLAG, N_CLIENT, N_AUTHCHAL, N_INITAI, N_EXPIRETOKENS, N_DROPTOKENS, N_STEALTOKENS, N_DEMOPACKET, -2, N_REMIP, N_NEWMAP, N_GETMAP, N_SENDMAP, N_CLIPBOARD, -3, N_EDITENT, N_EDITF, N_EDITT, N_EDITM, N_FLIP, N_COPY, N_PASTE, N_ROTATE, N_REPLACE, N_DELCUBE, N_EDITVAR, N_EDITVSLOT, N_EDITPATCH, N_UNDO, N_REDO, -4, N_POS, NUMMSG),
       connectfilter(-1, N_CONNECT, -2, N_AUTHANS, -3, N_PING, NUMMSG);
 
     int checktype(int type, clientinfo *ci)
@@ -2317,15 +2317,7 @@ namespace server
             gotents = loadentsfrompath(servermappath, ments, &mcrc);
             if(gotents) logoutf("loaditems(%s): fell back to persisted .ogz at %s", smapname, servermappath);
         }
-        int respawnents = 0, triggers = 0;
-        if(gotents) loopv(ments)
-        {
-            if(ments[i].type == RESPAWNPOINT) respawnents++;
-            else if(ments[i].type == ET_MAPMODEL && entities::validtriggertype(ments[i].attr3)) triggers++;
-        }
-        logoutf("loaditems(%s): mode=%s(%d) m_mp=%d loadents=%s ments=%d respawnpoints=%d triggers=%d",
-                smapname, modename(gamemode, "?"), gamemode, m_mp(gamemode) ? 1 : 0,
-                gotents ? "ok" : "FAILED", ments.length(), respawnents, triggers);
+        if(!gotents) logoutf("loaditems(%s): no entities on disk (loadents failed)", smapname);
         initservertriggers();
         if(m_edit || !gotents) return;
         loopv(ments) if(canspawnitem(ments[i].type))
@@ -2831,57 +2823,15 @@ namespace server
         }
     }
 
-    // ci->state.o is the eye-level position the client streams via N_POS; the engine-side
-    // proximity checks (entities::checkitems, entities::checktriggers) use feetpos() which is
-    // eye minus eyeheight. For ordinary players eyeheight is 14, set in dynent's ctor and never
-    // overridden -- subtract it here so server checks match the client thresholds exactly.
+    // ci->state.o is the eye-level position the client streams via N_POS; entities::checktriggers
+    // uses feetpos() which is eye minus eyeheight. For ordinary players eyeheight is 14, set in
+    // dynent's ctor and never overridden -- subtract it here so server checks match the client
+    // thresholds exactly.
     static inline vec serverfeet(const clientinfo *ci)
     {
         vec f = ci->state.o;
         f.z -= 14.0f;
         return f;
-    }
-
-    // Server-side RESPAWNPOINT pickup: when an alive client walks within 12 units of a
-    // RESPAWNPOINT entity (raw feet-to-entity distance, matching entities::checkitems), record
-    // the index in gamestate.respawnent and send N_RESPAWNENT so the client plays the pickup
-    // sound + stores the same index locally for its own UI. The server then uses
-    // ci->state.respawnent in sendspawn to drive findplayerspawn.
-    void tickrespawnpoints(vector<clientinfo *> &alive)
-    {
-        if(ments.empty() || alive.empty()) return;
-        // 1Hz diag: closest respawnpoint distance for cn0 -- so we can see whether the player's
-        // server-side position is anywhere near the entities the server is iterating.
-        static int diagms = 0;
-        if(gamemillis - diagms >= 1000)
-        {
-            diagms = gamemillis;
-            clientinfo *ci = alive[0];
-            float best = 1e9f; int bestidx = -1;
-            vec feet = serverfeet(ci);
-            loopv(ments) if(ments[i].type == RESPAWNPOINT)
-            {
-                float d = ments[i].o.dist(feet);
-                if(d < best) { best = d; bestidx = i; }
-            }
-            if(bestidx >= 0) logoutf("respawn diag: cn%d eye=(%.1f,%.1f,%.1f) feet=(%.1f,%.1f,%.1f) closest ent#%d dist=%.2f",
-                ci->clientnum, ci->state.o.x, ci->state.o.y, ci->state.o.z, feet.x, feet.y, feet.z, bestidx, best);
-        }
-        loopv(ments)
-        {
-            const entity &e = ments[i];
-            if(e.type != RESPAWNPOINT) continue;
-            loopvj(alive)
-            {
-                clientinfo *ci = alive[j];
-                if(ci->state.respawnent == i) continue;
-                float d = e.o.dist(serverfeet(ci));
-                if(d >= 12.0f) continue;
-                logoutf("respawnpoint pickup: cn%d ent#%d dist=%.2f", ci->clientnum, i, d);
-                ci->state.respawnent = i;
-                sendf(ci->clientnum, 1, "ri2", N_RESPAWNENT, i);
-            }
-        }
     }
 
     // Mirror of entities::checktriggers, but driven off every connected client's authoritative
@@ -2892,7 +2842,7 @@ namespace server
     {
         if(m_demo || interm || gamepaused) return;
         if(!m_mp(gamemode)) return;
-        if(ments.empty()) return;
+        if(ments.empty() || servertriggers.empty()) return;
         // Static buffer to avoid per-frame allocation.
         static vector<clientinfo *> alive;
         alive.setsize(0);
@@ -2903,8 +2853,6 @@ namespace server
             if(ci->state.state != CS_ALIVE) continue;
             alive.add(ci);
         }
-        tickrespawnpoints(alive);
-        if(servertriggers.empty()) return;
         const float prad = 4.1f; // default fpsent radius -- server has no per-client radius
         loopv(ments)
         {
@@ -3657,6 +3605,25 @@ namespace server
                     triggerstates[idx] = state;
                     sendf(-1, 1, "ri3x", N_TRIGGER, idx, state, sender);
                 }
+                break;
+            }
+
+            case N_RESPAWNENT:
+            {
+                // Client reports it walked onto a RESPAWNPOINT. Each client has perfect knowledge
+                // of its own position and entity layout, so we trust the index but validate it
+                // points at a real RESPAWNPOINT in ments (when ments is populated). The picking
+                // client is the only one that cares about its own checkpoint, so we just record
+                // it and skip the broadcast. The server re-sends it before N_SPAWNSTATE on death
+                // so the spawn flow always sees an authoritative value.
+                int idx = getint(p);
+                if(!cq) break;
+                if(idx >= 0)
+                {
+                    if(idx >= MAXENTS) break;
+                    if(ments.inrange(idx) && ments[idx].type != RESPAWNPOINT) break;
+                }
+                cq->state.respawnent = idx;
                 break;
             }
                 
